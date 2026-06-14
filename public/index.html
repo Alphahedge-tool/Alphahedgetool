@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nubra Spot Chart</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <aside class="controls" aria-label="Chart controls">
+          <div class="brand">
+            <div class="mark">N</div>
+            <div>
+              <h1>Nubra Spot Chart</h1>
+              <p>UTC+5:30 market view</p>
+            </div>
+          </div>
+
+          <label>
+            Environment
+            <select id="environment">
+              <option value="https://api.nubra.io">Production</option>
+              <option value="https://uatapi.nubra.io">UAT</option>
+            </select>
+          </label>
+
+          <label>
+            Session token
+            <input id="token" type="password" autocomplete="off" placeholder="Bearer session token" />
+          </label>
+
+          <label>
+            Device ID
+            <input id="deviceId" type="text" autocomplete="off" placeholder="TS123" />
+          </label>
+
+          <details class="login-box" open>
+            <summary>Login</summary>
+            <label>
+              Method
+              <select id="authMethod">
+                <option value="otp">SMS OTP</option>
+                <option value="totp">TOTP</option>
+              </select>
+            </label>
+            <label>
+              Phone
+              <input id="phone" type="tel" autocomplete="tel" placeholder="Registered phone number" />
+            </label>
+            <button id="sendOtp" type="button">Start Login</button>
+            <div class="split">
+              <label>
+                OTP / TOTP
+                <input id="otp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6 digit code" />
+              </label>
+              <label>
+                MPIN
+                <input id="mpin" type="password" inputmode="numeric" autocomplete="off" placeholder="MPIN" />
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="verifyOtp" type="button">Verify OTP</button>
+              <button id="verifyMpin" type="button">Verify MPIN</button>
+            </div>
+            <p id="loginStatus" class="login-status">Not logged in</p>
+          </details>
+
+          <div class="split">
+            <label>
+              Exchange
+              <select id="exchange">
+                <option>NSE</option>
+                <option>BSE</option>
+              </select>
+            </label>
+            <label>
+              Type
+              <select id="instrumentType">
+                <option value="INDEX">INDEX</option>
+                <option value="STOCK">STOCK</option>
+                <option value="FUT">FUT</option>
+                <option value="OPT">OPT</option>
+              </select>
+            </label>
+          </div>
+
+          <label>
+            Underlying / Symbol
+            <input id="symbol" list="symbols" type="text" value="NIFTY" placeholder="NIFTY, BANKNIFTY, RELIANCE" />
+            <datalist id="symbols"></datalist>
+          </label>
+
+          <div class="button-row">
+            <button id="loadInstruments" type="button" title="Load instruments">Lookup</button>
+            <button id="currentPrice" type="button" title="Fetch current price">Spot</button>
+          </div>
+
+          <div class="split">
+            <label>
+              Interval
+              <select id="interval">
+                <option>1m</option>
+                <option>3m</option>
+                <option>5m</option>
+                <option>15m</option>
+                <option>30m</option>
+                <option>1h</option>
+                <option>1d</option>
+              </select>
+            </label>
+            <label>
+              View
+              <select id="chartType">
+                <option value="candles">Candles</option>
+                <option value="line">Line</option>
+              </select>
+            </label>
+          </div>
+
+          <label>
+            Start
+            <input id="startDate" type="datetime-local" />
+          </label>
+
+          <label>
+            End
+            <input id="endDate" type="datetime-local" />
+          </label>
+
+          <button id="loadChart" class="primary" type="button">Load Chart</button>
+
+          <div class="status-grid">
+            <div>
+              <span>Spot</span>
+              <strong id="spotValue">--</strong>
+            </div>
+            <div>
+              <span>Change</span>
+              <strong id="changeValue">--</strong>
+            </div>
+            <div>
+              <span>Candles</span>
+              <strong id="candleCount">0</strong>
+            </div>
+            <div>
+              <span>Status</span>
+              <strong id="status">Idle</strong>
+            </div>
+          </div>
+        </aside>
+
+        <section class="chart-panel">
+          <div class="chart-header">
+            <div>
+              <h2 id="chartTitle">NIFTY</h2>
+              <p id="chartMeta">Prices in rupees, time in UTC+5:30</p>
+            </div>
+            <div class="toolbar">
+              <button id="fitChart" type="button" title="Fit visible range">Fit</button>
+              <button id="showAll" type="button" title="Show all loaded candles">All</button>
+              <button id="toggleTheme" type="button" title="Toggle theme">Theme</button>
+            </div>
+          </div>
+          <div id="chartHost" class="chart-host">
+            <div id="tvChart" class="tv-chart"></div>
+            <canvas id="glCanvas"></canvas>
+            <canvas id="overlayCanvas"></canvas>
+            <div id="tooltip" class="tooltip" hidden></div>
+          </div>
+
+          <div id="gexHistory" class="gex-history" hidden>
+            <div id="gexHistoryResize" class="gex-history-resize"></div>
+            <div class="gex-history-header">
+              <span class="gex-history-label">Net GEX &mdash; <span id="gexHistSymbol">--</span></span>
+              <span id="gexHistRegime" class="gex-regime-badge">--</span>
+              <span id="gexHistFlips" class="gex-flips-badge">0 flips</span>
+              <span id="gexHistPoints" class="gex-muted">0 pts</span>
+            </div>
+            <div id="gexTvChart" class="gex-tv-chart"></div>
+            <canvas id="gexHistCanvas"></canvas>
+          </div>
+
+          <div class="gex-panel">
+            <div class="gex-header">
+              <div>
+                <h2 id="gexTitle">Gamma Exposure</h2>
+                <p id="gexMeta">Net dealer gamma by strike &mdash; positive = dealers long gamma, negative = short</p>
+              </div>
+              <div class="gex-controls">
+                <label>
+                  Underlying
+                  <input id="gexSymbol" type="text" value="NIFTY" placeholder="NIFTY, BANKNIFTY…" />
+                </label>
+                <label>
+                  Expiry
+                  <select id="gexExpiry"><option value="">-- load first --</option></select>
+                </label>
+                <label>
+                  Exchange
+                  <select id="gexExchange">
+                    <option value="NSE">NSE</option>
+                    <option value="BSE">BSE</option>
+                  </select>
+                </label>
+                <button id="loadGex" class="primary" type="button">Load GEX</button>
+                <label style="min-width:130px">
+                  Date (IST)
+                  <input id="gexDate" type="date" />
+                </label>
+                <button id="dayGex" type="button" title="Reconstruct full-day net GEX from intraday OI history">Day GEX</button>
+                <button id="trackGex" type="button" title="Poll net GEX every minute and plot regime shifts">Track</button>
+                <button id="stopGex" type="button" title="Stop tracking" disabled>Stop</button>
+                <button id="clearGexHist" type="button" title="Clear history">Clear</button>
+              </div>
+            </div>
+            <div class="gex-stats" id="gexStats" hidden>
+              <div><span>Spot</span><strong id="gexSpot">--</strong></div>
+              <div><span>Net GEX</span><strong id="gexNet">--</strong></div>
+              <div><span>Call GEX</span><strong id="gexCall">--</strong></div>
+              <div><span>Put GEX</span><strong id="gexPut">--</strong></div>
+              <div><span>Flip Level</span><strong id="gexFlip">--</strong></div>
+              <div><span>Status</span><strong id="gexStatus">Idle</strong></div>
+            </div>
+            <div class="gex-chart-wrap" id="gexChartWrap" hidden>
+              <canvas id="gexCanvas"></canvas>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="./vendor/lightweight-charts.standalone.production.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
