@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, onMount, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import { render } from "solid-js/web";
 import "./styles.css";
 
@@ -60,6 +60,16 @@ function formatCompact(value) {
   return Number.isFinite(n) ? compactNumber.format(n) : "--";
 }
 
+function formatIndexValue(value) {
+  const n = toRupees(value);
+  return n == null ? "--" : number.format(n);
+}
+
+function formatPercent(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${n >= 0 ? "+" : ""}${n.toFixed(2)}%` : "--";
+}
+
 function pickOptionValue(option, keys) {
   if (!option) return undefined;
   for (const key of keys) {
@@ -82,6 +92,12 @@ const CHAIN_COLUMNS = [
 const CALL_COLUMN_ORDER = ["volume", "oi", "vega", "theta", "gamma", "delta", "iv", "ltp"];
 const PUT_COLUMN_ORDER = ["ltp", "iv", "delta", "gamma", "theta", "vega", "volume", "oi"];
 const DEFAULT_CHAIN_COLUMNS = Object.fromEntries(CHAIN_COLUMNS.map((column) => [column.key, true]));
+const MARKET_STRIP_SYMBOLS = [
+  { label: "NIFTY", instrument: "NIFTY", exchange: "NSE" },
+  { label: "BANKNIFTY", instrument: "BANKNIFTY", exchange: "NSE" },
+  { label: "SENSEX", instrument: "SENSEX", exchange: "BSE" },
+  { label: "INDIA VIX", instrument: "INDIA VIX", instruments: ["INDIA VIX", "INDIAVIX", "INDIA_VIX"], exchange: "NSE" }
+];
 
 function toLocalInput(date) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -170,6 +186,8 @@ function makeChart(host, options = {}) {
 
 function App() {
   const now = new Date();
+  const widgetMode = new URLSearchParams(window.location.search).get("view") === "widget";
+  const desktopApi = window.nubraDesktop;
   const [environment, setEnvironment] = createSignal("https://api.nubra.io");
   const [token, setToken] = createSignal(localStorage.getItem("nubraSessionToken") || "");
   const [deviceId, setDeviceId] = createSignal(localStorage.getItem("nubraDeviceId") || "");
@@ -179,10 +197,17 @@ function App() {
   const [mpin, setMpin] = createSignal("");
   const [flowId, setFlowId] = createSignal(sessionStorage.getItem("nubraFlowId") || "");
   const [loginStatus, setLoginStatus] = createSignal(token() ? "Session token loaded" : "Not logged in");
-  const [section, setSection] = createSignal("rolling");
+  const [section, setSection] = createSignal(widgetMode ? "chain" : "rolling");
   const [busy, setBusy] = createSignal(false);
   const [toast, setToast] = createSignal("");
   const [drawerOpen, setDrawerOpen] = createSignal(false);
+  const [marketStrip, setMarketStrip] = createSignal(MARKET_STRIP_SYMBOLS.map((item) => ({
+    ...item,
+    price: null,
+    change: null,
+    ok: false
+  })));
+  const [marketStripStatus, setMarketStripStatus] = createSignal("Waiting for session");
 
   const [symbol, setSymbol] = createSignal("NIFTY");
   const [instrumentType, setInstrumentType] = createSignal("INDEX");
@@ -222,7 +247,10 @@ function App() {
   const [chainExpiries, setChainExpiries] = createSignal([]);
   const [chainStatus, setChainStatus] = createSignal("Idle");
   const [chainData, setChainData] = createSignal(null);
+  const [chainFilterMode, setChainFilterMode] = createSignal("atm");
   const [chainAtmRange, setChainAtmRange] = createSignal("");
+  const [chainPremiumMin, setChainPremiumMin] = createSignal("");
+  const [chainPremiumMax, setChainPremiumMax] = createSignal("");
   const [chainColumnMenuOpen, setChainColumnMenuOpen] = createSignal(false);
   const [chainVisibleColumns, setChainVisibleColumns] = createSignal({ ...DEFAULT_CHAIN_COLUMNS });
 
@@ -257,6 +285,11 @@ function App() {
   const visibleCallColumns = createMemo(() => CALL_COLUMN_ORDER.filter((key) => chainVisibleColumns()[key]));
   const visiblePutColumns = createMemo(() => PUT_COLUMN_ORDER.filter((key) => chainVisibleColumns()[key]));
   const visibleOptionRows = createMemo(() => {
+    if (chainFilterMode() === "premium") {
+      const filter = parsePremiumFilter(chainPremiumMin(), chainPremiumMax());
+      if (!filter) return optionRows();
+      return optionRows().filter((row) => premiumInRange(row.ce, filter) || premiumInRange(row.pe, filter));
+    }
     const filter = parseChainAtmFilter(chainAtmRange(), optionRows(), chainData()?.atm);
     if (!filter) return optionRows();
     return optionRows().filter((row) => Number(row.strike) >= filter.min && Number(row.strike) <= filter.max);
@@ -281,6 +314,28 @@ function App() {
     if (sign === "+") return { min: atm, max: atm + distance };
     if (sign === "-") return { min: atm - distance, max: atm };
     return { min: atm - distance, max: atm + distance };
+  }
+
+  function parsePremiumFilter(minValue, maxValue) {
+    const min = Number(String(minValue || "").replace(/,/g, ""));
+    const max = Number(String(maxValue || "").replace(/,/g, ""));
+    const hasMin = Number.isFinite(min) && min >= 0;
+    const hasMax = Number.isFinite(max) && max >= 0;
+    if (!hasMin && !hasMax) return null;
+    const low = hasMin ? min : 0;
+    const high = hasMax ? max : Number.POSITIVE_INFINITY;
+    return { min: Math.min(low, high), max: Math.max(low, high) };
+  }
+
+  function premiumInRange(option, filter) {
+    const premium = toRupees(option?.ltp);
+    return premium != null && premium >= filter.min && premium <= filter.max;
+  }
+
+  function showPremiumSide(option) {
+    if (chainFilterMode() !== "premium") return true;
+    const filter = parsePremiumFilter(chainPremiumMin(), chainPremiumMax());
+    return filter ? premiumInRange(option, filter) : true;
   }
 
   function toggleChainColumn(key) {
@@ -373,6 +428,37 @@ function App() {
     return payload;
   }
 
+  async function loadMarketStrip() {
+    if (!authed()) {
+      setMarketStripStatus("Waiting for session");
+      return;
+    }
+    const results = await Promise.all(MARKET_STRIP_SYMBOLS.map(async (item) => {
+      let lastError = "";
+      for (const instrument of item.instruments || [item.instrument]) {
+        const path = item.exchange === "BSE"
+          ? `optionchains/${encodeURIComponent(instrument)}/price?exchange=BSE`
+          : `optionchains/${encodeURIComponent(instrument)}/price`;
+        try {
+          const data = await nubraFetch(path);
+          return {
+            ...item,
+            instrument,
+            price: data?.price,
+            prevClose: data?.prev_close,
+            change: data?.change,
+            ok: data?.price != null || data?.change != null
+          };
+        } catch (error) {
+          lastError = error.message;
+        }
+      }
+      return { ...item, price: null, change: null, ok: false, error: lastError };
+    }));
+    setMarketStrip(results);
+    setMarketStripStatus(results.some((item) => item.ok) ? "Live snapshot" : "Market data unavailable");
+  }
+
   async function run(action) {
     setBusy(true);
     setToast("");
@@ -454,7 +540,15 @@ function App() {
 
   function initPriceChart() {
     if (priceChart || !priceChartHost) return;
+    if (!window.LightweightCharts) {
+      window.setTimeout(initPriceChart, 100);
+      return;
+    }
     priceChart = makeChart(priceChartHost, { timeScale: { timeVisible: true, secondsVisible: false } });
+    if (!priceChart) {
+      window.setTimeout(initPriceChart, 100);
+      return;
+    }
     const options = {
       upColor: "#21d19f",
       downColor: "#ff5d67",
@@ -481,6 +575,7 @@ function App() {
 
   async function loadPriceChart() {
     initPriceChart();
+    if (!candleSeries) throw new Error("Chart engine is still loading. Try Load Chart again in a moment.");
     setChartStatus("Loading");
     const sym = symbol().trim().toUpperCase();
     const data = await nubraFetch("charts/timeseries", {
@@ -515,6 +610,7 @@ function App() {
       .filter((row) => [row.open, row.high, row.low, row.close].every(Number.isFinite))
       .sort((a, b) => a.time - b.time);
     candleSeries.setData(candles);
+    queueChartResize();
     resizeChart(priceChart, priceChartHost);
     priceChart.timeScale().fitContent();
     setCandleCount(candles.length);
@@ -708,6 +804,10 @@ function App() {
 
   function initRollChart() {
     if (rollChart || !rollChartHost) return;
+    if (!window.LightweightCharts) {
+      window.setTimeout(initRollChart, 100);
+      return;
+    }
     rollChart = makeChart(rollChartHost, {
       leftPriceScale: {
         visible: true,
@@ -721,6 +821,10 @@ function App() {
         scaleMargins: { top: 0.08, bottom: 0.08 }
       }
     });
+    if (!rollChart) {
+      window.setTimeout(initRollChart, 100);
+      return;
+    }
 
     const addLine = (opts) => rollChart.addLineSeries
       ? rollChart.addLineSeries(opts)
@@ -1068,6 +1172,20 @@ function App() {
   });
 
   createEffect(() => {
+    if (!authed()) {
+      setMarketStrip(MARKET_STRIP_SYMBOLS.map((item) => ({ ...item, price: null, change: null, ok: false })));
+      setMarketStripStatus("Waiting for session");
+      return;
+    }
+    token();
+    deviceId();
+    environment();
+    untrack(() => loadMarketStrip());
+    const timer = window.setInterval(() => untrack(() => loadMarketStrip()), 30000);
+    onCleanup(() => window.clearInterval(timer));
+  });
+
+  createEffect(() => {
     if (!authed()) return;
     if (importMode()) return; // don't auto-fetch when showing imported data
     const loadKey = [
@@ -1103,14 +1221,51 @@ function App() {
     : "";
 
   return (
-    <div class="min-h-screen" style="background:var(--bg-main);color:var(--text-primary)">
-      <header class="flex items-center justify-between px-5 py-2.5" style="background:var(--bg-panel);border-bottom:1px solid var(--border-subtle)">
-        <div class="flex min-w-0 items-center gap-3">
+    <div class={`min-h-screen ${widgetMode ? "desktop-widget-mode" : ""}`} style="background:var(--bg-main);color:var(--text-primary)">
+      <Show when={widgetMode}>
+        <div class="widget-titlebar">
+          <div class="widget-drag-zone">
+            <strong>Option Chain Widget</strong>
+            <span>{chainSymbol()} · {chainExchange()} · {chainExpiry() || "Auto"}</span>
+          </div>
+          <button class="widget-title-button" onClick={() => setDrawerOpen(true)}>Session</button>
+          <button class="widget-title-button" onClick={() => desktopApi?.openMain?.()}>Main App</button>
+          <button class="widget-title-button close" onClick={() => desktopApi?.closeWidget?.()}>Close</button>
+        </div>
+      </Show>
+
+      <Show when={!widgetMode}>
+      <header class="app-header">
+        <div class="app-brand">
           <div class="grid h-7 w-7 shrink-0 place-items-center rounded font-bold text-xs" style="background:var(--accent-cyan);color:#0d1117">N</div>
           <div class="min-w-0">
             <p class="text-[9px] font-semibold" style="color:var(--text-tertiary);letter-spacing:0">Nubra</p>
             <h1 class="truncate text-[13px] font-semibold" style="color:var(--text-primary)">Options Intelligence</h1>
           </div>
+        </div>
+
+        <div class="market-nav-strip" title={marketStripStatus()}>
+          <For each={marketStrip()}>
+            {(item) => {
+              const changeValue = Number(item.change);
+              const tone = Number.isFinite(changeValue) && changeValue < 0 ? "down" : "up";
+              return (
+                <div class={`market-nav-item ${item.ok ? tone : "muted"}`}>
+                  <div class="market-nav-topline">
+                    <span class="market-nav-label">{item.label}</span>
+                    <span class="market-nav-exchange">{item.exchange}</span>
+                  </div>
+                  <strong>{formatIndexValue(item.price)}</strong>
+                  <span class="market-nav-change">
+                    <Show when={item.ok}>
+                      <span class="market-nav-arrow">{tone === "down" ? "↓" : "↑"}</span>
+                    </Show>
+                    {formatPercent(item.change)}
+                  </span>
+                </div>
+              );
+            }}
+          </For>
         </div>
 
         <nav class="flex items-center gap-0.5 rounded-md p-0.5 text-xs" style="background:#0d1117;border:1px solid var(--border-subtle)">
@@ -1138,6 +1293,11 @@ function App() {
         </nav>
 
         <div class="flex items-center gap-2.5">
+          <Show when={desktopApi?.openWidget}>
+            <button class="terminal-button" onClick={() => desktopApi.openWidget()}>
+              Widget
+            </button>
+          </Show>
           <button class="terminal-button-secondary" onClick={() => setDrawerOpen(true)}>
             Session
           </button>
@@ -1147,6 +1307,7 @@ function App() {
           </div>
         </div>
       </header>
+      </Show>
 
       <Show when={drawerOpen()}>
         <div class="fixed inset-0 z-40 bg-black/50" onClick={() => setDrawerOpen(false)}></div>
@@ -1469,10 +1630,29 @@ function App() {
                       </div>
                     </Show>
                   </div>
-                  <label class="chain-inline-field chain-range-field">
-                    ATM Range
-                    <input class="chain-filter" value={chainAtmRange()} placeholder="±800 / +2" onInput={(e) => setChainAtmRange(e.currentTarget.value)} />
+                  <label class="chain-inline-field">
+                    Filter
+                    <select class="terminal-input" value={chainFilterMode()} onInput={(e) => setChainFilterMode(e.currentTarget.value)}>
+                      <option value="atm">ATM distance</option>
+                      <option value="premium">Premium range</option>
+                    </select>
                   </label>
+                  <Show when={chainFilterMode() === "atm"}>
+                    <label class="chain-inline-field chain-range-field">
+                      ATM Distance
+                      <input class="chain-filter" value={chainAtmRange()} placeholder="+/-800 / +2" onInput={(e) => setChainAtmRange(e.currentTarget.value)} />
+                    </label>
+                  </Show>
+                  <Show when={chainFilterMode() === "premium"}>
+                    <label class="chain-inline-field chain-premium-field">
+                      Premium From
+                      <input class="chain-filter" inputmode="decimal" value={chainPremiumMin()} placeholder="100" onInput={(e) => setChainPremiumMin(e.currentTarget.value)} />
+                    </label>
+                    <label class="chain-inline-field chain-premium-field">
+                      Premium To
+                      <input class="chain-filter" inputmode="decimal" value={chainPremiumMax()} placeholder="300" onInput={(e) => setChainPremiumMax(e.currentTarget.value)} />
+                    </label>
+                  </Show>
                   <div class="chain-pill">{chainData()?.all_expiries?.length || chainExpiries().length || 0} expiries</div>
                 </div>
               </div>
@@ -1505,17 +1685,19 @@ function App() {
                           <tr class={Number(row.strike) === Number(chainData()?.atm) ? "atm-row" : ""}>
                             <For each={visibleCallColumns()}>
                               {(key, index) => {
-                                const props = optionCellProps(row.ce, key);
+                                const showSide = showPremiumSide(row.ce);
+                                const props = optionCellProps(showSide ? row.ce : null, key);
                                 const sideClass = index() === 0 ? "chain-side-call-start" : index() === visibleCallColumns().length - 1 ? "chain-side-call-end" : "";
-                                return <OptionCell {...props} tone={props.tone === "oi" ? "oi-call" : props.tone} class={sideClass} />;
+                                return <OptionCell {...props} tone={props.tone === "oi" ? "oi-call" : props.tone} class={[sideClass, showSide ? "" : "chain-cell-filtered"].filter(Boolean).join(" ")} />;
                               }}
                             </For>
                             <td class="strike-cell">{formatStrike(row.strike)}</td>
                             <For each={visiblePutColumns()}>
                               {(key, index) => {
-                                const props = optionCellProps(row.pe, key);
+                                const showSide = showPremiumSide(row.pe);
+                                const props = optionCellProps(showSide ? row.pe : null, key);
                                 const sideClass = index() === 0 ? "chain-side-put-start" : index() === visiblePutColumns().length - 1 ? "chain-side-put-end" : "";
-                                return <OptionCell {...props} tone={props.tone === "oi" ? "oi-put" : props.tone} class={sideClass} />;
+                                return <OptionCell {...props} tone={props.tone === "oi" ? "oi-put" : props.tone} class={[sideClass, showSide ? "" : "chain-cell-filtered"].filter(Boolean).join(" ")} />;
                               }}
                             </For>
                           </tr>
