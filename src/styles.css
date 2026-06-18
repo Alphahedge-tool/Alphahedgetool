@@ -181,6 +181,51 @@
     color: var(--text-primary);
   }
 
+  .line-tool-panel {
+    background: #0d0d0d;
+    border-bottom-color: var(--border-subtle);
+  }
+
+  .line-list {
+    display: grid;
+    gap: 6px;
+  }
+
+  .line-list-item {
+    display: grid;
+    grid-template-columns: 10px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 5px 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 10px;
+    text-align: left;
+  }
+
+  .line-list-item:hover {
+    color: var(--text-primary);
+  }
+
+  .line-list-color {
+    width: 10px;
+    height: 2px;
+    border-radius: 999px;
+  }
+
+  .line-list-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .line-list-value {
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+  }
+
   /* ── Metrics ── */
   .metric-label {
     @apply shrink-0 text-[9px] font-semibold;

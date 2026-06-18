@@ -69,6 +69,22 @@ const loginState = {
   flowId: sessionStorage.getItem("nubraFlowId") || ""
 };
 
+const liveState = {
+  socket: null,
+  signature: "",
+  enabled: false,
+  lastCandleTime: 0,
+  lastGexTime: 0,
+  includeGex: false,
+  backfillTimer: null,
+  backfillInFlight: false,
+  gexBackfillInFlight: false,
+  animFrame: null,
+  gexAnimFrame: null,
+  optionCache: new Map(),
+  gexSpot: 0
+};
+
 const tvState = {
   mainChart: null,
   candleSeries: null,
@@ -117,6 +133,36 @@ function seedDates() {
     rollStartEl.value = toLocalInput(rollStart);
     rollEndEl.value = toLocalInput(rollEnd);
   }
+}
+
+function todayIstDate() {
+  return new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+function istClockMinutes(timeMs = Date.now()) {
+  const ist = new Date(timeMs + 5.5 * 3600 * 1000);
+  return ist.getUTCHours() * 60 + ist.getUTCMinutes();
+}
+
+function isAfterMarketClose(timeMs = Date.now()) {
+  return istClockMinutes(timeMs) >= 15 * 60 + 30;
+}
+
+function stopLiveAfterClose() {
+  if (liveState.enabled) {
+    stopLiveSocket();
+    setStatus("Closed");
+    gexEls.status.textContent = "Market closed";
+  }
+}
+
+function localInputDate(value) {
+  return value ? value.slice(0, 10) : "";
+}
+
+function selectedChartIsToday() {
+  const today = todayIstDate();
+  return localInputDate(els.endDate.value) === today || gexHistEls?.gexDate?.value === today;
 }
 
 function seedAuth() {
@@ -367,6 +413,95 @@ function mergeCandles(symbolData) {
     .sort((a, b) => a.time - b.time);
 }
 
+function intervalMs(interval = els.interval.value) {
+  const value = String(interval || "1m").trim();
+  const n = Number.parseInt(value, 10) || 1;
+  if (value.endsWith("s")) return n * 1000;
+  if (value.endsWith("h")) return n * 60 * 60 * 1000;
+  if (value.endsWith("d")) return n * 24 * 60 * 60 * 1000;
+  return n * 60 * 1000;
+}
+
+function bucketStartMs(timeMs, stepMs = intervalMs()) {
+  return Math.floor(timeMs / stepMs) * stepMs;
+}
+
+function appendOrReplaceCandle(candle) {
+  const next = state.candles.filter((point) => point.time !== candle.time);
+  next.push(candle);
+  state.candles = next.sort((a, b) => a.time - b.time);
+  els.candleCount.textContent = String(state.candles.length);
+}
+
+function appendOrReplaceGexPoint(point) {
+  const next = gexHist.points.filter((item) => item.time !== point.time);
+  next.push(point);
+  gexHist.points = next.sort((a, b) => a.time - b.time);
+}
+
+function mergeCandleList(nextCandles) {
+  const byTime = new Map(state.candles.map((candle) => [candle.time, candle]));
+  for (const candle of nextCandles) {
+    if ([candle.open, candle.high, candle.low, candle.close].every(Number.isFinite)) {
+      byTime.set(candle.time, candle);
+    }
+  }
+  state.candles = [...byTime.values()].sort((a, b) => a.time - b.time);
+  els.candleCount.textContent = String(state.candles.length);
+}
+
+async function backfillCandlesQuietly(startMs, endMs = Date.now()) {
+  if (liveState.backfillInFlight) return;
+  const symbol = els.symbol.value.trim().toUpperCase();
+  if (!symbol || !els.token.value.trim() || !els.deviceId.value.trim()) return;
+
+  liveState.backfillInFlight = true;
+  try {
+    const payload = {
+      query: [{
+        exchange: els.exchange.value,
+        type: els.instrumentType.value,
+        values: [symbol],
+        fields: ["open", "high", "low", "close", "cumulative_volume"],
+        startDate: new Date(startMs).toISOString(),
+        endDate: new Date(endMs).toISOString(),
+        interval: els.interval.value,
+        intraDay: false,
+        realTime: false
+      }]
+    };
+    const data = await nubraFetch("charts/timeseries", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    const candles = mergeCandles(extractSymbolData(data, symbol));
+    if (!candles.length) return;
+    mergeCandleList(candles);
+    setTvMainData({ fit: false });
+    const last = state.candles[state.candles.length - 1];
+    if (last) liveState.lastCandleTime = Math.max(liveState.lastCandleTime, last.time);
+    render();
+  } catch (error) {
+    console.warn("[Live] quiet candle backfill failed:", error.message);
+  } finally {
+    liveState.backfillInFlight = false;
+  }
+}
+
+async function backfillGexQuietly() {
+  if (liveState.gexBackfillInFlight) return;
+  liveState.gexBackfillInFlight = true;
+  const statusText = gexEls.status.textContent;
+  try {
+    await loadDayGex();
+    gexEls.status.textContent = statusText;
+  } catch (error) {
+    console.warn("[Live] quiet GEX backfill failed:", error.message);
+  } finally {
+    liveState.gexBackfillInFlight = false;
+  }
+}
+
 async function loadChart() {
   setStatus("Loading");
   const symbol = els.symbol.value.trim().toUpperCase();
@@ -400,6 +535,9 @@ async function loadChart() {
   els.chartTitle.textContent = `${symbol} ${els.interval.value}`;
   els.chartMeta.textContent = `${els.exchange.value} ${els.instrumentType.value} | Prices in rupees | UTC+5:30`;
   setStatus(state.candles.length ? "Ready" : "No data");
+  if (selectedChartIsToday()) {
+    startLiveSocket({ includeGex: Boolean(gexEls?.expiry?.value) });
+  }
 }
 
 function fitChart() {
@@ -834,7 +972,7 @@ function initTvCharts() {
   });
 }
 
-function setTvMainData() {
+function setTvMainData({ fit = true } = {}) {
   initTvCharts();
   if (!tvState.mainChart) return;
   const candleData = state.candles.map((c) => ({
@@ -850,7 +988,26 @@ function setTvMainData() {
   const lineMode = els.chartType.value === "line";
   tvState.candleSeries.applyOptions({ visible: !lineMode });
   tvState.lineSeries.applyOptions({ visible: lineMode });
-  tvState.mainChart.timeScale().fitContent();
+  if (fit) tvState.mainChart.timeScale().fitContent();
+}
+
+function updateTvCandle(candle) {
+  initTvCharts();
+  if (!tvState.mainChart || !tvState.candleSeries || !tvState.lineSeries) return;
+  const time = tvTime(candle.time);
+  tvState.candleSeries.update({
+    time,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close
+  });
+  tvState.lineSeries.update({ time, value: candle.close });
+  const lineMode = els.chartType.value === "line";
+  tvState.candleSeries.applyOptions({ visible: !lineMode });
+  tvState.lineSeries.applyOptions({ visible: lineMode });
+  const timeScale = tvState.mainChart.timeScale();
+  if (timeScale.scrollToRealTime) timeScale.scrollToRealTime();
 }
 
 function setTvGexData() {
@@ -864,6 +1021,260 @@ function setTvGexData() {
   const range = tvState.mainChart?.timeScale().getVisibleLogicalRange();
   if (range) tvState.gexChart.timeScale().setVisibleLogicalRange(range);
   else tvState.gexChart.timeScale().fitContent();
+}
+
+function updateTvGexPoint(point) {
+  initTvCharts();
+  if (!tvState.gexBaselineSeries) return;
+  tvState.gexBaselineSeries.update({
+    time: tvTime(point.time),
+    value: point.netGex
+  });
+}
+
+function animateTvGexPoint(point, fromValue) {
+  if (liveState.gexAnimFrame) cancelAnimationFrame(liveState.gexAnimFrame);
+  const start = performance.now();
+  const duration = 260;
+  const baseValue = Number.isFinite(fromValue) ? fromValue : point.netGex;
+
+  function frame(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    const netGex = baseValue + (point.netGex - baseValue) * eased;
+    updateTvGexPoint({ ...point, netGex });
+    if (t < 1) liveState.gexAnimFrame = requestAnimationFrame(frame);
+    else {
+      liveState.gexAnimFrame = null;
+      updateTvGexPoint(point);
+    }
+  }
+
+  liveState.gexAnimFrame = requestAnimationFrame(frame);
+}
+
+function streamMs(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return Date.now();
+  if (n > 1_000_000_000_000_000) return Math.floor(n / 1_000_000);
+  if (n > 1_000_000_000_000) return n;
+  return n * 1000;
+}
+
+function animateTvCandle(candle, fromClose) {
+  if (liveState.animFrame) cancelAnimationFrame(liveState.animFrame);
+  const start = performance.now();
+  const duration = 260;
+  const baseClose = Number.isFinite(fromClose) ? fromClose : candle.open;
+
+  function frame(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    const close = baseClose + (candle.close - baseClose) * eased;
+    updateTvCandle({
+      ...candle,
+      close,
+      high: Math.max(candle.high, close),
+      low: Math.min(candle.low, close)
+    });
+    if (t < 1) liveState.animFrame = requestAnimationFrame(frame);
+    else {
+      liveState.animFrame = null;
+      updateTvCandle(candle);
+    }
+  }
+
+  liveState.animFrame = requestAnimationFrame(frame);
+}
+
+function upsertLiveCandle(raw) {
+  if (isAfterMarketClose()) {
+    stopLiveAfterClose();
+    return;
+  }
+  const step = intervalMs();
+  const rawTime = streamMs(raw.bucket_timestamp ?? raw.timestamp);
+  const bucketTime = bucketStartMs(rawTime, step);
+  const previousLast = state.candles[state.candles.length - 1];
+  const updateTime = previousLast && bucketTime < previousLast.time ? previousLast.time : bucketTime;
+  const candle = {
+    time: updateTime,
+    open: toRupees(raw.open) ?? Number(raw.open),
+    high: toRupees(raw.high) ?? Number(raw.high),
+    low: toRupees(raw.low) ?? Number(raw.low),
+    close: toRupees(raw.close) ?? Number(raw.close)
+  };
+  if (![candle.open, candle.high, candle.low, candle.close].every(Number.isFinite)) return;
+
+  if (previousLast && updateTime - previousLast.time > step * 1.5) {
+    backfillCandlesQuietly(previousLast.time + step, candle.time + step);
+  }
+
+  const existing = state.candles.find((item) => item.time === candle.time);
+  const previousClose = existing?.close ?? previousLast?.close;
+  appendOrReplaceCandle(candle);
+  liveState.lastCandleTime = Math.max(liveState.lastCandleTime, candle.time);
+  els.spotValue.textContent = rupee.format(candle.close);
+  els.chartMeta.textContent = `Live ${els.exchange.value} ${els.instrumentType.value} | ${els.interval.value} | UTC+5:30`;
+
+  animateTvCandle(candle, previousClose);
+  const maxIndex = Math.max(1, state.candles.length - 1);
+  const span = Math.max(3, state.view.end - state.view.start);
+  const wasAtRight = !previousLast || state.view.end >= Math.max(1, state.candles.length - 2);
+  if (wasAtRight) {
+    state.view.end = maxIndex;
+    state.view.start = Math.max(0, maxIndex - span);
+  }
+  render();
+}
+
+function startLiveBackfillMonitor() {
+  clearInterval(liveState.backfillTimer);
+  liveState.backfillTimer = setInterval(() => {
+    if (!liveState.enabled || !selectedChartIsToday()) return;
+    if (isAfterMarketClose()) {
+      stopLiveAfterClose();
+      return;
+    }
+    const last = state.candles[state.candles.length - 1];
+    const lastTime = Math.max(liveState.lastCandleTime || 0, last?.time || 0);
+    if (!lastTime) return;
+    const step = intervalMs();
+    if (Date.now() - lastTime > step + 20_000) {
+      backfillCandlesQuietly(lastTime + step, Date.now());
+    }
+    if (liveState.includeGex && liveState.lastGexTime && Date.now() - liveState.lastGexTime > 80_000) {
+      backfillGexQuietly();
+    }
+  }, 15_000);
+}
+
+function optionCacheKey(item, side) {
+  const refId = item.ref_id ?? item.refId;
+  if (refId != null) return `${side}:ref:${refId}`;
+  const strike = toRupees(item.strike_price ?? item.sp) ?? Number(item.strike_price ?? item.sp);
+  return `${side}:strike:${strike}`;
+}
+
+function updateOptionCache(chain, side) {
+  const items = side === "CE" ? chain.ce : chain.pe;
+  for (const item of Array.isArray(items) ? items : []) {
+    const key = optionCacheKey(item, side);
+    const prev = liveState.optionCache.get(key) || { side };
+    const strike = toRupees(item.strike_price ?? item.sp) ?? Number(item.strike_price ?? item.sp);
+    const gamma = Number(item.gamma);
+    const oi = Number(item.open_interest ?? item.oi);
+    const lotSize = Number(item.lot_size ?? item.ls);
+    liveState.optionCache.set(key, {
+      ...prev,
+      side,
+      strike: Number.isFinite(strike) ? strike : prev.strike,
+      gamma: Number.isFinite(gamma) ? gamma : prev.gamma,
+      oi: Number.isFinite(oi) ? oi : prev.oi,
+      lotSize: Number.isFinite(lotSize) && lotSize > 0 ? lotSize : prev.lotSize
+    });
+  }
+}
+
+function optionRowsFromStream(chain, receivedAtMs = Date.now()) {
+  if (typeof chain === "string") {
+    try {
+      chain = JSON.parse(chain);
+    } catch {
+      return null;
+    }
+  }
+  if (!chain || typeof chain !== "object") return null;
+  const nextSpot = toRupees(chain.current_price) ?? Number(chain.current_price);
+  if (Number.isFinite(nextSpot) && nextSpot > 0) liveState.gexSpot = nextSpot;
+  const spot = liveState.gexSpot || gexState.spot;
+  if (!Number.isFinite(spot) || spot <= 0) return null;
+
+  updateOptionCache(chain, "CE");
+  updateOptionCache(chain, "PE");
+
+  const rowsByStrike = new Map();
+  let callGex = 0;
+  let putGex = 0;
+  let grossGex = 0;
+  let usableLegs = 0;
+  const tickTime = Number.isFinite(Number(receivedAtMs)) ? Number(receivedAtMs) : Date.now();
+
+  for (const cached of liveState.optionCache.values()) {
+    const lotSize = Number(cached.lotSize) || lotFallback(chain.asset || gexEls.symbol.value);
+    const gamma = Number(cached.gamma);
+    const oi = Number(cached.oi);
+    const strike = Number(cached.strike);
+    if (!Number.isFinite(strike) || !Number.isFinite(gamma) || !Number.isFinite(oi) || oi <= 0 || gamma === 0) continue;
+    const signedGex = gexCr(gamma, oi, lotSize, spot) * (cached.side === "CE" ? 1 : -1);
+    if (!Number.isFinite(signedGex) || signedGex === 0) continue;
+    usableLegs += 1;
+    if (cached.side === "CE") callGex += signedGex;
+    else putGex += signedGex;
+    grossGex += Math.abs(signedGex);
+    const row = rowsByStrike.get(strike) || { strike, callGex: 0, putGex: 0, netGex: 0 };
+    if (cached.side === "CE") row.callGex += signedGex;
+    else row.putGex += signedGex;
+    row.netGex = row.callGex + row.putGex;
+    rowsByStrike.set(strike, row);
+  }
+
+  if (!usableLegs || !rowsByStrike.size || grossGex <= 0) return null;
+  return {
+    time: bucketStartMs(tickTime, 60_000),
+    spot,
+    callGex,
+    putGex,
+    grossGex,
+    netGex: callGex + putGex,
+    strikes: [...rowsByStrike.values()].sort((a, b) => a.strike - b.strike)
+  };
+}
+
+function upsertGexSnapshot(point) {
+  if (isAfterMarketClose()) {
+    stopLiveAfterClose();
+    return;
+  }
+  if (!point || !Number.isFinite(point.grossGex) || point.grossGex <= 0 || !Array.isArray(point.strikes) || !point.strikes.length) {
+    return;
+  }
+  const prev = gexHist.points[gexHist.points.length - 1];
+  const step = 60_000;
+  const updateTime = prev && point.time < prev.time ? prev.time : point.time;
+  const nextPoint = { ...point, time: updateTime };
+  const existing = gexHist.points.find((item) => item.time === nextPoint.time);
+  const fromValue = existing?.netGex ?? prev?.netGex;
+  if (prev && updateTime - prev.time > step * 1.5) {
+    backfillGexQuietly();
+  }
+  if (!prev || prev.time !== nextPoint.time) {
+    if (prev) {
+      const prevSign = Math.sign(prev.netGex);
+      const currSign = Math.sign(nextPoint.netGex);
+      if (prevSign !== 0 && currSign !== 0 && prevSign !== currSign) {
+        gexHist.flips.push({ time: nextPoint.time, from: prevSign, to: currSign });
+      }
+    }
+  }
+  appendOrReplaceGexPoint(nextPoint);
+  liveState.lastGexTime = Math.max(liveState.lastGexTime, nextPoint.time);
+
+  const flipLevel = calcFlipLevel(gexState.strikes);
+  gexHistEls.regime.textContent = nextPoint.netGex >= 0 ? "POSITIVE" : "NEGATIVE";
+  gexHistEls.regime.className = `gex-regime-badge ${nextPoint.netGex >= 0 ? "positive" : "negative"}`;
+  gexHistEls.flipsLbl.textContent = `${gexHist.flips.length} flip${gexHist.flips.length !== 1 ? "s" : ""}`;
+  gexHistEls.pointsLbl.textContent = `${gexHist.points.length} pts`;
+  gexEls.stats.hidden = false;
+  gexEls.net.textContent = gexFmt(nextPoint.netGex);
+  gexEls.net.style.color = nextPoint.netGex >= 0 ? "var(--up)" : "var(--down)";
+  gexEls.call.textContent = gexFmt(nextPoint.callGex);
+  gexEls.put.textContent = gexFmt(nextPoint.putGex);
+  gexEls.spot.textContent = nextPoint.spot ? rupee.format(nextPoint.spot) : "--";
+  gexEls.flip.textContent = flipLevel ? rupee.format(flipLevel) : "--";
+  gexEls.meta.textContent = `Live Net GEX: ${gexFmt(nextPoint.netGex)} | Total exposure: ${gexFmt(nextPoint.grossGex)} | ${gexEls.exchange.value}`;
+  renderGexHistory({ syncTv: false });
+  animateTvGexPoint(nextPoint, fromValue);
 }
 
 function resizeTvCharts() {
@@ -1461,8 +1872,13 @@ async function loadGex() {
   gexState.expiry = selectedExpiry;
   gexEls.title.textContent = `Gamma Exposure - ${symbol} ${selectedExpiry}`;
   gexEls.meta.textContent = `${exchange} refdata only | CE ${ceCount} / PE ${peCount} | Lot size from refdata`;
-  gexEls.status.textContent = `Ready: ${selectedRows.length} strikes from refdata. Click Day GEX.`;
+  gexEls.status.textContent = `Ready: ${selectedRows.length} strikes from refdata. ${date === todayIstDate() ? "Connecting option-chain live..." : "Click Day GEX."}`;
   gexEls.chartWrap.hidden = true;
+  if (date === todayIstDate()) {
+    gexHistEls.wrap.hidden = false;
+    gexHistEls.symLabel.textContent = `${symbol} ${selectedExpiry}`;
+    startLiveSocket({ includeGex: true });
+  }
 }
 
 bindSafe(gexEls.load, loadGex);
@@ -1569,12 +1985,21 @@ async function startTracking() {
   gexHistEls.wrap.hidden    = false;
   gexHistEls.symLabel.textContent = gexEls.symbol.value.trim().toUpperCase() || "--";
   gexEls.status.textContent = "Track: building selected-date intraday GEX...";
+  let keepLive = false;
   try {
     await loadDayGex();
-    gexEls.status.textContent = "Track ready from selected-date intraday batches";
+    if (gexHistEls.gexDate.value === todayIstDate() && startLiveSocket({ includeGex: true })) {
+      gexHist.tracking = true;
+      gexHistEls.track.disabled = true;
+      gexHistEls.stop.disabled = false;
+      gexEls.status.textContent = "Track live websocket running";
+      keepLive = true;
+    }
+    if (!keepLive) gexEls.status.textContent = "Track ready from selected-date intraday batches";
   } catch (error) {
     gexEls.status.textContent = `Track error: ${error.message}`;
   } finally {
+    if (keepLive) return;
     gexHist.tracking = false;
     gexHistEls.track.disabled = false;
     gexHistEls.stop.disabled = true;
@@ -1585,6 +2010,7 @@ function stopTracking() {
   gexHist.tracking = false;
   clearInterval(gexHist.trackTimer);
   gexHist.trackTimer = null;
+  stopLiveSocket();
   gexHistEls.track.disabled = false;
   gexHistEls.stop.disabled  = true;
   gexEls.status.textContent = "Tracking stopped";
@@ -1601,8 +2027,133 @@ function clearGexHistory() {
   setTvGexData();
 }
 
-function renderGexHistory() {
-  setTvGexData();
+function stopLiveSocket() {
+  liveState.enabled = false;
+  liveState.signature = "";
+  liveState.includeGex = false;
+  liveState.optionCache.clear();
+  liveState.gexSpot = 0;
+  clearInterval(liveState.backfillTimer);
+  liveState.backfillTimer = null;
+  if (liveState.animFrame) {
+    cancelAnimationFrame(liveState.animFrame);
+    liveState.animFrame = null;
+  }
+  if (liveState.gexAnimFrame) {
+    cancelAnimationFrame(liveState.gexAnimFrame);
+    liveState.gexAnimFrame = null;
+  }
+  if (liveState.socket) {
+    liveState.socket.close();
+    liveState.socket = null;
+  }
+}
+
+function startLiveSocket({ includeGex = false } = {}) {
+  if (!selectedChartIsToday()) return false;
+  if (isAfterMarketClose()) {
+    setStatus("Closed");
+    gexEls.status.textContent = "Market closed";
+    return false;
+  }
+  const symbol = (includeGex ? gexEls.symbol.value : els.symbol.value).trim().toUpperCase();
+  const exchange = includeGex ? gexEls.exchange.value : els.exchange.value;
+  const expiry = includeGex ? gexEls.expiry.value : "";
+  const token = els.token.value.trim();
+  const deviceId = els.deviceId.value.trim();
+  if (!symbol || !token || !deviceId) return false;
+
+  const signature = JSON.stringify({
+    symbol,
+    exchange,
+    interval: els.interval.value,
+    expiry,
+    environment: els.environment.value
+  });
+  if (liveState.socket && liveState.signature === signature) return true;
+
+  stopLiveSocket();
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(`${protocol}//${location.host}/ws/live`);
+  liveState.socket = socket;
+  liveState.signature = signature;
+  liveState.enabled = true;
+  liveState.includeGex = includeGex;
+  liveState.lastCandleTime = state.candles[state.candles.length - 1]?.time || 0;
+  liveState.lastGexTime = gexHist.points[gexHist.points.length - 1]?.time || 0;
+  startLiveBackfillMonitor();
+
+  socket.addEventListener("open", () => {
+    socket.send(JSON.stringify({
+      type: "subscribe",
+      environment: els.environment.value,
+      token,
+      deviceId,
+      symbol,
+      exchange,
+      interval: els.interval.value,
+      expiry
+    }));
+    setStatus("Live");
+    gexEls.status.textContent = includeGex ? "Live websocket connecting..." : gexEls.status.textContent;
+  });
+
+  socket.addEventListener("message", (event) => {
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (isAfterMarketClose()) {
+      stopLiveAfterClose();
+      return;
+    }
+    if (message.event === "ohlcv") {
+      upsertLiveCandle(message.data || {});
+      return;
+    }
+    if (message.event === "option") {
+      const snapshot = optionRowsFromStream(message.data || {}, message.received_at_ms);
+      if (!snapshot) {
+        gexEls.status.textContent = `Live GEX waiting for OI/gamma (${liveState.optionCache.size} legs cached)`;
+        return;
+      }
+      gexState.strikes = snapshot.strikes;
+      gexState.spot = snapshot.spot;
+      upsertGexSnapshot(snapshot);
+      gexEls.status.textContent = `Live GEX ${gexFmt(snapshot.netGex)}`;
+      return;
+    }
+    if (message.event === "status") {
+      if (message.status === "connected" || message.status === "subscribed") setStatus("Live");
+      if (includeGex && message.status) gexEls.status.textContent = `Live ${message.status}`;
+      return;
+    }
+    if (message.event === "error") {
+      setStatus("Live err");
+      gexEls.status.textContent = message.message || "Live websocket error";
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    if (liveState.socket === socket) liveState.socket = null;
+    if (liveState.enabled) {
+      setStatus("Live closed");
+      gexEls.status.textContent = "Live websocket closed";
+    }
+  });
+
+  socket.addEventListener("error", () => {
+    setStatus("Live err");
+    if (includeGex) gexEls.status.textContent = "Live websocket error";
+  });
+
+  return true;
+}
+
+function renderGexHistory({ syncTv = true } = {}) {
+  if (syncTv) setTvGexData();
   const canvas = gexHistEls.canvas;
   const dpr    = window.devicePixelRatio || 1;
   const rect   = canvas.getBoundingClientRect();
@@ -2026,6 +2577,10 @@ async function loadDayGex() {
   const allNames = optionRows.map((row) => row.name);
   const startDate = `${istDate}T03:45:00.000Z`;
   const endDate = `${istDate}T10:00:00.000Z`;
+  const sessionEndMs = Date.parse(endDate);
+  const queryEndDate = istDate === todayIstDate()
+    ? new Date(Math.min(sessionEndMs, Date.now())).toISOString()
+    : endDate;
   const spotByTs = new Map();
   try {
     gexEls.status.textContent = "Intraday GEX: fetching underlying spot";
@@ -2038,7 +2593,7 @@ async function loadDayGex() {
           values: [symbol],
           fields: ["close"],
           startDate,
-          endDate,
+          endDate: queryEndDate,
           interval: "1m",
           intraDay: false,
           realTime: false
@@ -2068,7 +2623,7 @@ async function loadDayGex() {
         values: batch,
         fields: ["gamma", "cumulative_oi"],
         startDate,
-        endDate,
+        endDate: queryEndDate,
         interval: "1m",
         intraDay: false,
         realTime: false
@@ -2110,10 +2665,16 @@ async function loadDayGex() {
   }
 
   const gridStart = Date.parse(startDate);
-  const gridEnd = Date.parse(endDate);
+  const rawEnd = rawTs[rawTs.length - 1];
+  const nowEnd = istDate === todayIstDate() ? bucketStartMs(Date.now(), 60_000) : sessionEndMs;
+  const gridEnd = Math.min(sessionEndMs, rawEnd, nowEnd);
   const allTs = [];
   for (let ts = gridStart; ts <= gridEnd; ts += 60_000) {
     allTs.push(ts);
+  }
+  if (!allTs.length) {
+    gexEls.status.textContent = "Intraday GEX: no current-session points returned";
+    return;
   }
 
   const lookupByName = new Map();
@@ -2188,6 +2749,9 @@ async function loadDayGex() {
   gexState.spot = last.spot;
   renderGexHistory();
   setTvGexData();
+  if (istDate === todayIstDate()) {
+    startLiveSocket({ includeGex: true });
+  }
 }
 
 gexHistEls.track.addEventListener("click", startTracking);
@@ -2465,18 +3029,36 @@ async function loadRollingStraddle() {
 
   if (!selected.length) throw new Error("No complete bid/ask straddle points found.");
   initRollingChart();
-  tvState.rollBidSeries.setData(bidLine);
-  tvState.rollAskSeries.setData(askLine);
-  tvState.rollChart.timeScale().fitContent();
+  tvState.rollBidSeries.setData([]);
+  tvState.rollAskSeries.setData([]);
 
-  const last = selected[selected.length - 1];
-  rollEls.spot.textContent = rupee.format(last.spot);
-  rollEls.strike.textContent = number.format(last.strike);
-  rollEls.bid.textContent = rupee.format(last.bid);
-  rollEls.ask.textContent = rupee.format(last.ask);
-  rollEls.points.textContent = String(selected.length);
+  const ANIM_MS = 1000;
+  const total = bidLine.length;
+  const startTs = performance.now();
+
   rollEls.meta.textContent = `${symbol} ${expiry} | 1s l1bid/l1ask | ${requiredStrikes.size} strikes | ${exchange}`;
-  setRollStatus("Ready");
+  setRollStatus("Animating…");
+
+  function animFrame(now) {
+    const elapsed = now - startTs;
+    const fraction = Math.min(elapsed / ANIM_MS, 1);
+    const count = Math.max(1, Math.round(fraction * total));
+    tvState.rollBidSeries.setData(bidLine.slice(0, count));
+    tvState.rollAskSeries.setData(askLine.slice(0, count));
+    if (count < total) {
+      requestAnimationFrame(animFrame);
+      return;
+    }
+    tvState.rollChart.timeScale().fitContent();
+    const last = selected[selected.length - 1];
+    rollEls.spot.textContent = rupee.format(last.spot);
+    rollEls.strike.textContent = number.format(last.strike);
+    rollEls.bid.textContent = rupee.format(last.bid);
+    rollEls.ask.textContent = rupee.format(last.ask);
+    rollEls.points.textContent = String(selected.length);
+    setRollStatus("Ready");
+  }
+  requestAnimationFrame(animFrame);
 }
 
 bindSafe(rollEls.loadExpiries, loadRollingExpiries);

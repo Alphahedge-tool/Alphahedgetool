@@ -239,6 +239,10 @@ function App() {
   });
   const [rollExportData, setRollExportData] = createSignal([]);
   const [importMode, setImportMode] = createSignal(false);
+  const [rollLineName, setRollLineName] = createSignal("");
+  const [rollLineValue, setRollLineValue] = createSignal("");
+  const [rollLineTarget, setRollLineTarget] = createSignal("bid");
+  const [rollDrawnLines, setRollDrawnLines] = createSignal([]);
   let importFileRef;
 
   const [chainSymbol, setChainSymbol] = createSignal("NIFTY");
@@ -253,6 +257,7 @@ function App() {
   const [chainPremiumMax, setChainPremiumMax] = createSignal("");
   const [chainColumnMenuOpen, setChainColumnMenuOpen] = createSignal(false);
   const [chainVisibleColumns, setChainVisibleColumns] = createSignal({ ...DEFAULT_CHAIN_COLUMNS });
+  const [chainLive, setChainLive] = createSignal(false);
 
   let priceChartHost;
   let rollChartHost;
@@ -262,8 +267,15 @@ function App() {
   let rollBidSeries;
   let rollAskSeries;
   let rollIvSeries;
+  const rollPriceLines = new Map();
   let autoRollLoadedKey = "";
   let autoChainLoadedKey = "";
+  let rollLiveSocket = null;
+  let rollLiveContext = null;
+  let rollLiveFlushTimer = null;
+  let chainLiveSocket = null;
+
+  const [rollLive, setRollLive] = createSignal(false);
 
   const authed = createMemo(() => Boolean(token().trim() && deviceId().trim()));
   const optionRows = createMemo(() => {
@@ -640,11 +652,12 @@ function App() {
       })
       .map((row) => ({
         name: row.stock_name,
+        refId: liveRefId(row),
         expiry: String(row.expiry || ""),
         side: optionRowSide(row),
         strike: normalizeStrike(row.strike_price)
       }))
-      .filter((row) => Number.isFinite(row.strike) && row.expiry);
+      .filter((row) => Number.isFinite(row.strike) && row.expiry && row.refId);
   }
 
   async function loadRollingExpiries() {
@@ -717,6 +730,93 @@ function App() {
 
     setChainStatus("No chain");
     throw new Error(lastError?.message || "No valid option-chain expiry found.");
+  }
+
+  function normalizeLiveOption(option) {
+    if (!option || typeof option !== "object") return option;
+    return {
+      ...option,
+      sp: option.sp ?? option.strike_price,
+      strike_price: option.strike_price ?? option.sp,
+      ltp: option.ltp ?? option.last_traded_price,
+      oi: option.oi ?? option.open_interest,
+      previous_oi: option.previous_oi ?? option.previous_open_interest,
+      option_type: option.option_type ?? option.side
+    };
+  }
+
+  function normalizeLiveChain(chain) {
+    if (!chain || typeof chain !== "object") return null;
+    const previous = chainData() || {};
+    return {
+      ...previous,
+      ...chain,
+      asset: chain.asset ?? previous.asset ?? chainSymbol().trim().toUpperCase(),
+      expiry: chain.expiry ?? previous.expiry ?? chainExpiry(),
+      exchange: chain.exchange ?? previous.exchange ?? chainExchange(),
+      cp: chain.cp ?? chain.current_price ?? previous.cp,
+      atm: chain.atm ?? chain.at_the_money_strike ?? previous.atm,
+      ce: (Array.isArray(chain.ce) ? chain.ce : previous.ce || []).map(normalizeLiveOption),
+      pe: (Array.isArray(chain.pe) ? chain.pe : previous.pe || []).map(normalizeLiveOption),
+      all_expiries: previous.all_expiries || chainExpiries()
+    };
+  }
+
+  function handleChainLiveTick(chain) {
+    const next = normalizeLiveChain(chain);
+    if (!next) return;
+    setChainData(next);
+    if (next.expiry) setChainExpiry(String(next.expiry));
+    setChainStatus("Live");
+  }
+
+  function startChainLive() {
+    if (chainLiveSocket) { chainLiveSocket.close(); chainLiveSocket = null; }
+    const sym = chainSymbol().trim().toUpperCase();
+    const expiry = chainData()?.expiry || chainExpiry();
+    if (!sym) { setChainStatus("Symbol needed"); return; }
+    if (!expiry) { setChainStatus("Load/select expiry first"); return; }
+    if (!token().trim() || !deviceId().trim()) { setChainStatus("Session needed"); return; }
+
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${protocol}//${location.host}/ws/live`);
+    chainLiveSocket = ws;
+    setChainStatus("Live starting");
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        type: "subscribe",
+        environment: environment().includes("uat") ? "uat" : "prod",
+        token: token().replace("Bearer ", "").trim(),
+        deviceId: deviceId().trim(),
+        symbol: sym,
+        exchange: chainExchange(),
+        interval: "1m",
+        expiry
+      }));
+      setChainLive(true);
+      setChainStatus("Live subscribing");
+    };
+    ws.onmessage = (event) => {
+      let msg; try { msg = JSON.parse(event.data); } catch { return; }
+      if (msg.event === "option" && msg.data) handleChainLiveTick(msg.data);
+      if (msg.event === "status" && msg.status === "connected") setChainStatus("Live connected");
+      if (msg.event === "status" && msg.status === "subscribed") setChainStatus("Live");
+      if (msg.event === "status" && msg.status === "bridge-exit") setChainStatus(`Live bridge exited ${msg.code ?? ""}`.trim());
+      if (msg.event === "log" && msg.message) setChainStatus(msg.message.slice(0, 80));
+      if (msg.event === "error") setChainStatus(msg.message || "Live error");
+    };
+    ws.onclose = () => { chainLiveSocket = null; setChainLive(false); setChainStatus("Live stopped"); };
+    ws.onerror = () => setChainStatus("WS error");
+  }
+
+  function stopChainLive() {
+    if (chainLiveSocket) {
+      try { chainLiveSocket.send(JSON.stringify({ type: "stop" })); } catch {}
+      chainLiveSocket.close();
+      chainLiveSocket = null;
+    }
+    setChainLive(false);
+    setChainStatus("Ready");
   }
 
   function inferStrikeStep(strikes) {
@@ -800,6 +900,316 @@ function App() {
     }
     cursorByName.set(name, cursor);
     return cursor;
+  }
+
+  function firstPriceLevel(levels) {
+    const level = Array.isArray(levels) ? levels[0] : null;
+    const price = toRupees(level?.price);
+    return Number.isFinite(price) && price > 0 ? price : null;
+  }
+
+  function liveRefId(rowOrTick) {
+    const refId = rowOrTick?.refId ?? rowOrTick?.ref_id ?? rowOrTick?.refid ?? rowOrTick?.refID ?? rowOrTick?.instrument_id;
+    return refId == null ? "" : String(refId);
+  }
+
+  function liveIv(option) {
+    if (!option || typeof option !== "object") return null;
+    const directKeys = [
+      "iv",
+      "IV",
+      "iv_mid",
+      "ivMid",
+      "iv_percent",
+      "ivPercent",
+      "implied_volatility",
+      "impliedVolatility",
+      "volatility"
+    ];
+    for (const key of directKeys) {
+      const value = normalizeLiveIv(option[key]);
+      if (value != null) return value;
+    }
+    const bidIv = normalizeLiveIv(option.iv_bid ?? option.ivBid ?? option.bid_iv ?? option.bidIv);
+    const askIv = normalizeLiveIv(option.iv_ask ?? option.ivAsk ?? option.ask_iv ?? option.askIv);
+    if (bidIv != null && askIv != null) return (bidIv + askIv) / 2;
+    return bidIv ?? askIv;
+  }
+
+  function normalizeLiveIv(raw) {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return value <= 1 ? value * 100 : value;
+  }
+
+  function eachLivePayload(payload, visit) {
+    if (!payload) return;
+    if (Array.isArray(payload)) {
+      for (const item of payload) eachLivePayload(item, visit);
+      return;
+    }
+    if (typeof payload !== "object") return;
+    if (Array.isArray(payload.data)) eachLivePayload(payload.data, visit);
+    if (Array.isArray(payload.values)) eachLivePayload(payload.values, visit);
+    if (Array.isArray(payload.items)) eachLivePayload(payload.items, visit);
+    visit(payload);
+  }
+
+  function animateSeriesPoint(series, key, time, value) {
+    if (!series || !rollLiveContext || !Number.isFinite(value)) return;
+    const from = rollLiveContext.lastValues[key];
+    const start = Number.isFinite(from) ? from : value;
+    const duration = 420;
+    const started = performance.now();
+
+    const step = (now) => {
+      if (!rollLiveContext) return;
+      const progress = Math.min(1, (now - started) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      series.update({ time, value: start + (value - start) * eased });
+      if (progress < 1) rollLiveContext.frames[key] = requestAnimationFrame(step);
+      else {
+        series.update({ time, value });
+        rollLiveContext.lastValues[key] = value;
+        rollLiveContext.frames[key] = null;
+      }
+    };
+
+    if (rollLiveContext.frames[key]) cancelAnimationFrame(rollLiveContext.frames[key]);
+    rollLiveContext.frames[key] = requestAnimationFrame(step);
+  }
+
+  function readLiveLeg(row) {
+    if (!rollLiveContext || !row) return null;
+    const refId = liveRefId(row);
+    const book = refId ? rollLiveContext.orderbookByRef.get(refId) : null;
+    const greek = refId ? rollLiveContext.greeksByRef.get(refId) : null;
+    const optionTick = refId ? rollLiveContext.optionByRef.get(refId) : null;
+    const fallbackPrice = toRupees(row.last_traded_price);
+    return {
+      bid: firstPriceLevel(book?.bids) ?? fallbackPrice,
+      ask: firstPriceLevel(book?.asks) ?? fallbackPrice,
+      iv: liveIv(greek) ?? liveIv(optionTick) ?? liveIv(row),
+      hasBook: Boolean(book)
+    };
+  }
+
+  function updateRollLiveSnapshot(receivedAtMs = Date.now()) {
+    if (!rollLiveContext || !rollBidSeries || !rollAskSeries) return;
+    const { strikes, rowByKey, optionByRef, step, spot } = rollLiveContext;
+    if (!spot || spot <= 0) return;
+
+    const atm = nearestStrike(spot, strikes, step);
+    let best = null;
+    for (let offset = -2; offset <= 2; offset++) {
+      const strike = nearestStrike(atm + offset * step, strikes, step);
+      const ceRow = rowByKey.get(`${strike}|CE`);
+      const peRow = rowByKey.get(`${strike}|PE`);
+      if (!ceRow || !peRow) continue;
+
+      const ce = readLiveLeg(optionByRef.get(ceRow.refId) || ceRow);
+      const pe = readLiveLeg(optionByRef.get(peRow.refId) || peRow);
+      if (!ce || !pe || !ce.bid || !pe.bid || !ce.ask || !pe.ask) continue;
+
+      const bid = ce.bid + pe.bid;
+      const ask = ce.ask + pe.ask;
+      const mid = (bid + ask) / 2;
+      const ivValues = [ce.iv, pe.iv].filter((value) => Number.isFinite(value) && value > 0);
+      const ivMid = ivValues.length ? ivValues.reduce((sum, value) => sum + value, 0) / ivValues.length : null;
+      const hasBook = ce.hasBook && pe.hasBook;
+      if (!best || mid < best.mid) best = { strike, bid, ask, mid, ivMid, hasBook };
+    }
+    if (!best) {
+      setRollStatus("Live waiting for bid/ask");
+      return;
+    }
+
+    const time = tvTime(receivedAtMs);
+    animateSeriesPoint(rollBidSeries, "bid", time, best.bid);
+    animateSeriesPoint(rollAskSeries, "ask", time, best.ask);
+    if (best.ivMid != null && rollIvSeries) animateSeriesPoint(rollIvSeries, "iv", time, best.ivMid);
+
+    const nextRow = {
+      ts: receivedAtMs,
+      spot,
+      strike: best.strike,
+      bid: best.bid,
+      ask: best.ask,
+      mid: best.mid,
+      ivMid: best.ivMid
+    };
+    rollLiveContext.points += 1;
+    setRollExportData((rows) => [...rows, nextRow]);
+    setRollStats((prev) => ({
+      ...prev,
+      spot: rupee.format(spot),
+      strike: number.format(best.strike),
+      bid: rupee.format(best.bid),
+      ask: rupee.format(best.ask),
+      iv: best.ivMid != null ? `${best.ivMid.toFixed(1)}%` : prev.iv,
+      points: String((Number(prev.points) || 0) + 1),
+      meta: `${rollSymbol().trim().toUpperCase()} ${rollExpiry()} | live 1-second ${best.hasBook ? "bid/ask" : "LTP fallback"} | ${rollExchange()}`
+    }));
+    setRollStatus(best.hasBook ? "Live" : "Live LTP fallback");
+  }
+
+  function scheduleRollLiveUpdate(receivedAtMs) {
+    if (rollLiveFlushTimer) return;
+    rollLiveFlushTimer = setTimeout(() => {
+      rollLiveFlushTimer = null;
+      updateRollLiveSnapshot(receivedAtMs || Date.now());
+    }, 1000);
+  }
+
+  function handleRollLiveChain(chain, receivedAtMs) {
+    if (!rollLiveContext || !chain) return;
+    const spot = toRupees(chain.current_price);
+    if (spot && spot > 0) rollLiveContext.spot = spot;
+    const saveOption = (option, side) => {
+      const refId = liveRefId(option);
+      if (!refId) return;
+      const previous = rollLiveContext.optionByRef.get(refId) || {};
+      rollLiveContext.optionByRef.set(refId, { ...previous, ...option, side, refId });
+    };
+    for (const option of Array.isArray(chain.ce) ? chain.ce : []) saveOption(option, "CE");
+    for (const option of Array.isArray(chain.pe) ? chain.pe : []) saveOption(option, "PE");
+    scheduleRollLiveUpdate(receivedAtMs);
+  }
+
+  function handleRollLiveOrderbook(book, receivedAtMs) {
+    if (!rollLiveContext || !book) return;
+    eachLivePayload(book, (item) => {
+      const refId = liveRefId(item);
+      if (refId) rollLiveContext.orderbookByRef.set(refId, item);
+    });
+    scheduleRollLiveUpdate(receivedAtMs);
+  }
+
+  function handleRollLiveGreeks(greek, receivedAtMs) {
+    if (!rollLiveContext || !greek) return;
+    let foundIv = false;
+    eachLivePayload(greek, (item) => {
+      const refId = liveRefId(item);
+      if (!refId) return;
+      const previous = rollLiveContext.greeksByRef.get(refId) || {};
+      rollLiveContext.greeksByRef.set(refId, { ...previous, ...item });
+      if (liveIv(item) != null) foundIv = true;
+    });
+    if (!foundIv) setRollStatus("Live Greeks received, IV field missing");
+    scheduleRollLiveUpdate(receivedAtMs);
+  }
+
+  function startRollLive() {
+    if (rollLiveSocket) { rollLiveSocket.close(); rollLiveSocket = null; }
+    const expiry = rollExpiry();
+    if (!expiry) { setRollStatus("Select expiry first"); return; }
+    if (!token().trim() || !deviceId().trim()) { setRollStatus("Session needed"); return; }
+    if (!rollLiveContext?.refIds?.length) { setRollStatus("Plot Rolling first"); return; }
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${protocol}//${location.host}/ws/live`);
+    rollLiveSocket = ws;
+    setRollStatus("Live starting");
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        type: "subscribe",
+        environment: environment().includes("uat") ? "uat" : "prod",
+        token: token().replace("Bearer ", "").trim(),
+        deviceId: deviceId().trim(),
+        symbol: rollSymbol().trim().toUpperCase(),
+        exchange: rollExchange(),
+        interval: "1m",
+        expiry,
+        refIds: rollLiveContext.refIds
+      }));
+      setRollLive(true);
+      setRollStatus(`Live subscribing ${rollLiveContext.refIds.length} legs`);
+    };
+    ws.onmessage = (e) => {
+      let msg; try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.event === "option" && msg.data) handleRollLiveChain(msg.data, msg.received_at_ms);
+      if (msg.event === "orderbook" && msg.data) handleRollLiveOrderbook(msg.data, msg.received_at_ms);
+      if (msg.event === "greeks" && msg.data) handleRollLiveGreeks(msg.data, msg.received_at_ms);
+      if (msg.event === "status" && msg.status === "connected") setRollStatus("Live connected");
+      if (msg.event === "status" && msg.status === "subscribed") setRollStatus(`Live ${msg.ref_ids || 0} depth/IV refs`);
+      if (msg.event === "status" && msg.status === "bridge-exit") setRollStatus(`Live bridge exited ${msg.code ?? ""}`.trim());
+      if (msg.event === "log" && msg.message) setRollStatus(msg.message.slice(0, 90));
+      if (msg.event === "error") setRollStatus(msg.message || "Live error");
+    };
+    ws.onclose = () => { rollLiveSocket = null; setRollLive(false); setRollStatus("Live stopped"); };
+    ws.onerror = () => setRollStatus("WS error");
+  }
+
+  function stopRollLive() {
+    if (rollLiveFlushTimer) {
+      clearTimeout(rollLiveFlushTimer);
+      rollLiveFlushTimer = null;
+    }
+    if (rollLiveContext?.frames) {
+      for (const frame of Object.values(rollLiveContext.frames)) {
+        if (frame) cancelAnimationFrame(frame);
+      }
+      rollLiveContext.frames = { bid: null, ask: null, iv: null };
+    }
+    if (rollLiveSocket) {
+      try { rollLiveSocket.send(JSON.stringify({ type: "stop" })); } catch {}
+      rollLiveSocket.close();
+      rollLiveSocket = null;
+    }
+    setRollLive(false);
+    setRollStatus("Idle");
+  }
+
+  function rollLineSeries(target = rollLineTarget()) {
+    if (target === "ask") return rollAskSeries;
+    if (target === "iv") return rollIvSeries;
+    return rollBidSeries;
+  }
+
+  function rollLineColor(target = rollLineTarget()) {
+    if (target === "ask") return "#ffb15c";
+    if (target === "iv") return "#a78bfa";
+    return "#21d19f";
+  }
+
+  function rollLineTitle(name, target) {
+    const label = target === "iv" ? "IV" : target === "ask" ? "Ask" : "Bid";
+    return `${name || label} ${label}`;
+  }
+
+  function addRollLine() {
+    initRollChart();
+    const series = rollLineSeries();
+    const value = Number(rollLineValue());
+    if (!series || !Number.isFinite(value)) {
+      setRollStatus("Enter line value");
+      return;
+    }
+
+    const target = rollLineTarget();
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const title = rollLineTitle(rollLineName().trim(), target);
+    const handle = series.createPriceLine({
+      price: value,
+      color: rollLineColor(target),
+      lineWidth: 2,
+      lineStyle: 2,
+      axisLabelVisible: true,
+      title
+    });
+    rollPriceLines.set(id, { series, handle });
+    setRollDrawnLines((lines) => [...lines, { id, name: title, value, target }]);
+    setRollLineName("");
+    setRollLineValue("");
+    setRollStatus(`Line added: ${title}`);
+  }
+
+  function removeRollLine(id) {
+    const item = rollPriceLines.get(id);
+    if (item) {
+      item.series.removePriceLine(item.handle);
+      rollPriceLines.delete(id);
+    }
+    setRollDrawnLines((lines) => lines.filter((line) => line.id !== id));
   }
 
   function initRollChart() {
@@ -900,11 +1310,18 @@ function App() {
     }
 
     const optionNames = [];
+    const liveRefIds = new Set();
     for (const strike of requiredStrikes) {
       const ce = rowByKey.get(`${strike}|CE`);
       const pe = rowByKey.get(`${strike}|PE`);
-      if (ce) optionNames.push(ce.name);
-      if (pe) optionNames.push(pe.name);
+      if (ce) {
+        optionNames.push(ce.name);
+        liveRefIds.add(ce.refId);
+      }
+      if (pe) {
+        optionNames.push(pe.name);
+        liveRefIds.add(pe.refId);
+      }
     }
     if (!optionNames.length) throw new Error("No CE/PE symbols found around ATM +/-2.");
 
@@ -956,6 +1373,27 @@ function App() {
 
     const last = selected[selected.length - 1];
     const lastIv = ivLine.length ? ivLine[ivLine.length - 1].value : null;
+    rollLiveContext = {
+      strikes,
+      step,
+      rowByKey,
+      optionByRef: new Map(),
+      orderbookByRef: new Map(),
+      greeksByRef: new Map(),
+      refIds: [...liveRefIds],
+      spot: last.spot,
+      points: selected.length,
+      lastValues: {
+        bid: last.bid,
+        ask: last.ask,
+        iv: lastIv
+      },
+      frames: {
+        bid: null,
+        ask: null,
+        iv: null
+      }
+    };
     setRollStats({
       spot: rupee.format(last.spot),
       strike: number.format(last.strike),
@@ -1467,10 +1905,36 @@ function App() {
               </Show>
 
               <button class="terminal-button" onClick={() => { setImportMode(false); autoRollLoadedKey = ""; run(loadRollingStraddle); }} disabled={busy()}>Plot Rolling</button>
+              <Show
+                when={rollLive()}
+                fallback={<button class="terminal-button-secondary" onClick={startRollLive} disabled={busy() || !authed()}>Start Live</button>}
+              >
+                <button class="terminal-button-secondary" onClick={stopRollLive}>Stop Live</button>
+              </Show>
             </div>
           </div>
 
           {/* ── Chart workspace ── */}
+          <div class="control-panel line-tool-panel">
+            <label class="terminal-label">
+              Line Name
+              <input class="terminal-input w-36" value={rollLineName()} onInput={(e) => setRollLineName(e.currentTarget.value)} placeholder="Support" />
+            </label>
+            <label class="terminal-label">
+              Value
+              <input class="terminal-input w-28" value={rollLineValue()} onInput={(e) => setRollLineValue(e.currentTarget.value)} placeholder="125.50" inputmode="decimal" />
+            </label>
+            <label class="terminal-label">
+              Target
+              <select class="terminal-input" value={rollLineTarget()} onInput={(e) => setRollLineTarget(e.currentTarget.value)}>
+                <option value="bid">Bid</option>
+                <option value="ask">Ask</option>
+                <option value="iv">IV</option>
+              </select>
+            </label>
+            <button class="terminal-button-secondary" onClick={addRollLine}>Draw Line</button>
+          </div>
+
           <div class="chart-workspace">
             {/* Metrics sidebar */}
             <aside class="chart-sidebar">
@@ -1503,6 +1967,21 @@ function App() {
                 <span class="sidebar-label">Status</span>
                 <span class="sidebar-status-value">{rollStatus()}</span>
               </div>
+              <Show when={rollDrawnLines().length}>
+                <div class="sidebar-divider" />
+                <div class="line-list">
+                  <span class="sidebar-label">Lines</span>
+                  <For each={rollDrawnLines()}>
+                    {(line) => (
+                      <button class="line-list-item" onClick={() => removeRollLine(line.id)} title="Remove line">
+                        <span class="line-list-color" style={`background:${rollLineColor(line.target)}`}></span>
+                        <span class="line-list-name">{line.name}</span>
+                        <span class="line-list-value">{line.target === "iv" ? `${line.value}%` : rupee.format(line.value)}</span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
             </aside>
 
             {/* Single chart card — Bid/Ask on right axis, IV on left axis */}
@@ -1580,6 +2059,7 @@ function App() {
                   <label class="chain-inline-field">
                     Underlying
                     <input class="terminal-input w-24" value={chainSymbol()} onInput={(e) => {
+                      stopChainLive();
                       setChainSymbol(e.currentTarget.value.toUpperCase());
                       setChainData(null);
                       setChainExpiry("");
@@ -1589,6 +2069,7 @@ function App() {
                   <label class="chain-inline-field">
                     Exchange
                     <select class="terminal-input" value={chainExchange()} onInput={(e) => {
+                      stopChainLive();
                       setChainExchange(e.currentTarget.value);
                       setChainData(null);
                       setChainExpiry("");
@@ -1601,6 +2082,7 @@ function App() {
                   <label class="chain-inline-field">
                     Expiry
                     <select class="terminal-input w-32" value={chainExpiry()} onInput={(e) => {
+                      stopChainLive();
                       setChainExpiry(e.currentTarget.value);
                       setChainData(null);
                     }}>
@@ -1610,6 +2092,12 @@ function App() {
                   </label>
                   <button class="terminal-button-secondary" onClick={() => run(loadOptionChainExpiries)} disabled={busy()}>Expiries</button>
                   <button class="terminal-button" onClick={() => { autoChainLoadedKey = ""; run(loadOptionChain); }} disabled={busy()}>Load</button>
+                  <Show
+                    when={chainLive()}
+                    fallback={<button class="terminal-button-secondary" onClick={startChainLive} disabled={busy() || !authed()}>Start Live</button>}
+                  >
+                    <button class="terminal-button-secondary" onClick={stopChainLive}>Stop Live</button>
+                  </Show>
                   <div class="chain-column-menu">
                     <button class="chain-icon-button" title="Choose columns" onClick={() => setChainColumnMenuOpen((open) => !open)}>Columns</button>
                     <Show when={chainColumnMenuOpen()}>

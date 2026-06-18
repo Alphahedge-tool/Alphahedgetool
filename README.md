@@ -5,13 +5,15 @@ Local WebGL chart for Nubra spot and historical OHLC data.
 ## Run
 
 ```powershell
-cmd /c npm run start
+cmd /c npm start
 ```
 
-Open:
+This builds and opens the desktop app.
 
-```text
-http://localhost:5174
+For the browser-only server, run:
+
+```powershell
+cmd /c npm run start:web
 ```
 
 ## API Usage

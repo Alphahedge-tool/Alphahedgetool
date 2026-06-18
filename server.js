@@ -1,11 +1,16 @@
 import http from "node:http";
+import { spawn } from "node:child_process";
+import { appendFile } from "node:fs/promises";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { WebSocketServer } from "ws";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const publicRoot = join(__dirname, "public");
 const distRoot = join(__dirname, "dist");
+const bridgePath = join(__dirname, "scripts", "nubra_ws_bridge.py");
+const liveLogPath = join(__dirname, "live-ws.log");
 const port = Number(process.env.PORT || 5174);
 
 const mime = {
@@ -39,6 +44,15 @@ function randomId() {
 
 function digits(value) {
   return String(value || "").replace(/\D/g, "");
+}
+
+function encodeBridgeConfig(config) {
+  return Buffer.from(JSON.stringify(config), "utf8").toString("base64");
+}
+
+function liveLog(message, extra = {}) {
+  const line = JSON.stringify({ ts: new Date().toISOString(), message, ...extra }) + "\n";
+  appendFile(liveLogPath, line).catch(() => {});
 }
 
 function nubraBaseUrl(environment) {
@@ -338,7 +352,122 @@ async function serveStatic(req, res) {
   }
 }
 
-http.createServer((req, res) => {
+function attachLiveWebSocket(server) {
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on("upgrade", (req, socket, head) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname !== "/ws/live") return;
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit("connection", ws, req);
+    });
+  });
+
+  wss.on("connection", (ws) => {
+    let bridge = null;
+    const sampleCounts = { option: 0, orderbook: 0, greeks: 0 };
+    liveLog("client-connected");
+
+    const send = (payload) => {
+      if (ws.readyState === 1) ws.send(JSON.stringify(payload));
+    };
+
+    const stopBridge = () => {
+      if (bridge && !bridge.killed) bridge.kill();
+      bridge = null;
+    };
+
+    ws.on("message", (raw) => {
+      let input;
+      try {
+        input = JSON.parse(raw.toString("utf8"));
+      } catch {
+        send({ event: "error", message: "Invalid websocket JSON." });
+        return;
+      }
+
+      if (input.type === "stop") {
+        stopBridge();
+        send({ event: "status", status: "stopped" });
+        return;
+      }
+
+      if (input.type !== "subscribe") {
+        send({ event: "error", message: "Unknown websocket command." });
+        return;
+      }
+
+      stopBridge();
+      const config = {
+        environment: input.environment,
+        token: input.token,
+        deviceId: input.deviceId,
+        symbol: input.symbol,
+        exchange: input.exchange,
+        interval: input.interval,
+        expiry: input.expiry,
+        refIds: Array.isArray(input.refIds) ? input.refIds : []
+      };
+      liveLog("subscribe", {
+        symbol: config.symbol,
+        exchange: config.exchange,
+        expiry: config.expiry,
+        refIds: config.refIds.length,
+        hasToken: Boolean(config.token),
+        hasDeviceId: Boolean(config.deviceId)
+      });
+      bridge = spawn("python", [bridgePath, encodeBridgeConfig(config)], {
+        cwd: __dirname,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+
+      let stdoutBuffer = "";
+      bridge.stdout.on("data", (chunk) => {
+        stdoutBuffer += chunk.toString("utf8");
+        const lines = stdoutBuffer.split(/\r?\n/);
+        stdoutBuffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const payload = JSON.parse(line);
+            if (sampleCounts[payload.event] != null && sampleCounts[payload.event] < 3) {
+              sampleCounts[payload.event] += 1;
+              const data = payload.data;
+              const first = Array.isArray(data) ? data[0] : data;
+              liveLog("sample", {
+                event: payload.event,
+                topKeys: first && typeof first === "object" ? Object.keys(first).slice(0, 24) : [],
+                ceKeys: first?.ce?.[0] ? Object.keys(first.ce[0]).slice(0, 24) : [],
+                peKeys: first?.pe?.[0] ? Object.keys(first.pe[0]).slice(0, 24) : []
+              });
+            }
+            send(payload);
+          } catch {
+            send({ event: "log", message: line });
+          }
+        }
+      });
+      bridge.stderr.on("data", (chunk) => {
+        const message = chunk.toString("utf8").trim();
+        if (message) {
+          liveLog("bridge-stderr", { message });
+          send({ event: "log", message });
+        }
+      });
+      bridge.on("exit", (code) => {
+        bridge = null;
+        liveLog("bridge-exit", { code });
+        send({ event: "status", status: "bridge-exit", code });
+      });
+      send({ event: "status", status: "starting" });
+    });
+
+    ws.on("close", stopBridge);
+    ws.on("error", stopBridge);
+  });
+}
+
+const server = http.createServer((req, res) => {
   if (req.url === "/api/auth/start") {
     startAuth(req, res);
     return;
@@ -360,6 +489,10 @@ http.createServer((req, res) => {
     return;
   }
   serveStatic(req, res);
-}).listen(port, () => {
+});
+
+attachLiveWebSocket(server);
+
+server.listen(port, () => {
   console.log(`Nubra Spot Chart running at http://localhost:${port}`);
 });
