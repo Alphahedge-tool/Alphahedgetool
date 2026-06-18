@@ -2032,8 +2032,13 @@ function App() {
               scheduleApplyRollManualScales();
               dragStart = {
                 x: event.clientX,
-                min: u.scales.x.min,
-                max: u.scales.x.max
+                y: event.clientY,
+                xMin: u.scales.x.min,
+                xMax: u.scales.x.max,
+                priceMin: u.scales.price?.min,
+                priceMax: u.scales.price?.max,
+                ivMin: u.scales.iv?.min,
+                ivMax: u.scales.iv?.max
               };
               over.setPointerCapture?.(event.pointerId);
             };
@@ -2041,13 +2046,25 @@ function App() {
               if (!dragStart || !rollChartData[0]?.length) return;
               event.preventDefault();
               const rect = over.getBoundingClientRect();
-              const span = dragStart.max - dragStart.min;
               const dx = event.clientX - dragStart.x;
+              const dy = event.clientY - dragStart.y;
               const x = rollChartData[0];
-              const shift = -(dx / rect.width) * span;
-              const range = clampRange(dragStart.min + shift, dragStart.max + shift, x[0], x[x.length - 1], span);
-              rememberRollScale("x", range);
-              u.setScale("x", range);
+              const xSpan = dragStart.xMax - dragStart.xMin;
+              const xShift = -(dx / Math.max(1, rect.width)) * xSpan;
+              const xRange = clampRange(dragStart.xMin + xShift, dragStart.xMax + xShift, x[0], x[x.length - 1], xSpan);
+              rememberRollScale("x", xRange);
+              u.setScale("x", xRange);
+
+              const panYScale = (scaleKey, min, max) => {
+                if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return;
+                const span = max - min;
+                const shift = (dy / Math.max(1, rect.height)) * span;
+                const range = clampRange(min + shift, max + shift, -Infinity, Infinity, span);
+                rememberRollScale(scaleKey, range);
+                u.setScale(scaleKey, range);
+              };
+              panYScale("price", dragStart.priceMin, dragStart.priceMax);
+              panYScale("iv", dragStart.ivMin, dragStart.ivMax);
             };
             const pointerUp = (event) => {
               dragStart = null;
