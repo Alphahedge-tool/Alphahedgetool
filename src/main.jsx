@@ -1981,20 +1981,11 @@ function App() {
                 const { min, max } = chartXBounds();
                 if (!Number.isFinite(min) || !Number.isFinite(max)) return;
                 const xPct = Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width)));
-                if (event.ctrlKey || event.metaKey) {
-                  zoomAxis(u, "x", xPct, factor, min, max, 10);
-                } else {
-                  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-                  panAxis(u, "x", delta / Math.max(1, rect.width), min, max);
-                }
+                zoomAxis(u, "x", xPct, factor, min, max, 10);
                 return;
               }
               const yPct = Math.min(1, Math.max(0, 1 - ((event.clientY - rect.top) / Math.max(1, rect.height))));
-              if (event.ctrlKey || event.metaKey) {
-                zoomAxis(u, scaleKey, yPct, factor, -Infinity, Infinity, 0.01);
-              } else {
-                panAxis(u, scaleKey, -event.deltaY / Math.max(1, rect.height), -Infinity, Infinity);
-              }
+              zoomAxis(u, scaleKey, yPct, factor, -Infinity, Infinity, 0.01);
             };
             const pointerDown = (event) => {
               if (event.button !== 0 || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -2041,14 +2032,18 @@ function App() {
               if (axisDragStart.scaleKey === "x") {
                 const dx = event.clientX - axisDragStart.x;
                 const { min, max } = chartXBounds();
-                const shift = -(dx / Math.max(1, rect.width)) * span;
-                const range = clampRange(axisDragStart.min + shift, axisDragStart.max + shift, min, max, span);
+                const mid = (axisDragStart.min + axisDragStart.max) / 2;
+                const factor = Math.exp(-dx / Math.max(120, rect.width));
+                const nextSpan = Math.max(10, span * factor);
+                const range = clampRange(mid - nextSpan / 2, mid + nextSpan / 2, min, max, 10);
                 u.setScale("x", range);
                 return;
               }
               const dy = event.clientY - axisDragStart.y;
-              const shift = (dy / Math.max(1, rect.height)) * span;
-              const range = clampRange(axisDragStart.min + shift, axisDragStart.max + shift, -Infinity, Infinity, span);
+              const mid = (axisDragStart.min + axisDragStart.max) / 2;
+              const factor = Math.exp(dy / Math.max(120, rect.height));
+              const nextSpan = Math.max(0.01, span * factor);
+              const range = clampRange(mid - nextSpan / 2, mid + nextSpan / 2, -Infinity, Infinity, 0.01);
               u.setScale(axisDragStart.scaleKey, range);
             };
             const axisPointerUp = (event) => {
