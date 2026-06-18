@@ -750,6 +750,15 @@
     cursor: grabbing;
   }
 
+  .chart-card-body .u-axis {
+    cursor: grab;
+    touch-action: none;
+  }
+
+  .chart-card-body .u-axis:active {
+    cursor: grabbing;
+  }
+
   .chart-window-tabs {
     display: inline-flex;
     align-items: center;

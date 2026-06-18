@@ -1918,6 +1918,10 @@ function App() {
   function createRollInteractionPlugin() {
     let over;
     let destroy = () => {};
+    const chartXBounds = () => {
+      const x = rollChartData[0] || [];
+      return { min: x[0], max: x[x.length - 1] };
+    };
     const zoomAxis = (u, key, pct, factor, hardMin, hardMax, minSpan) => {
       const scale = u.scales[key];
       if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
@@ -1941,7 +1945,9 @@ function App() {
         ready: [
           (u) => {
             over = u.over;
+            const axisEls = [...u.root.querySelectorAll(".u-axis")];
             let dragStart = null;
+            let axisDragStart = null;
             const wheel = (event) => {
               if (!rollChartData[0]?.length) return;
               event.preventDefault();
@@ -1964,6 +1970,30 @@ function App() {
               if (zoomY) {
                 zoomAxis(u, "price", yPct, factor, -Infinity, Infinity, 0.01);
                 zoomAxis(u, "iv", yPct, factor, -Infinity, Infinity, 0.01);
+              }
+            };
+            const axisWheel = (scaleKey) => (event) => {
+              if (!rollChartData[0]?.length) return;
+              event.preventDefault();
+              const rect = event.currentTarget.getBoundingClientRect();
+              const factor = event.deltaY < 0 ? 0.86 : 1.16;
+              if (scaleKey === "x") {
+                const { min, max } = chartXBounds();
+                if (!Number.isFinite(min) || !Number.isFinite(max)) return;
+                const xPct = Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width)));
+                if (event.ctrlKey || event.metaKey) {
+                  zoomAxis(u, "x", xPct, factor, min, max, 10);
+                } else {
+                  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+                  panAxis(u, "x", delta / Math.max(1, rect.width), min, max);
+                }
+                return;
+              }
+              const yPct = Math.min(1, Math.max(0, 1 - ((event.clientY - rect.top) / Math.max(1, rect.height))));
+              if (event.ctrlKey || event.metaKey) {
+                zoomAxis(u, scaleKey, yPct, factor, -Infinity, Infinity, 0.01);
+              } else {
+                panAxis(u, scaleKey, -event.deltaY / Math.max(1, rect.height), -Infinity, Infinity);
               }
             };
             const pointerDown = (event) => {
@@ -1990,11 +2020,61 @@ function App() {
               dragStart = null;
               over.releasePointerCapture?.(event.pointerId);
             };
+            const axisPointerDown = (scaleKey) => (event) => {
+              if (event.button !== 0 || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+              const scale = u.scales[scaleKey];
+              if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
+              axisDragStart = {
+                scaleKey,
+                x: event.clientX,
+                y: event.clientY,
+                min: scale.min,
+                max: scale.max
+              };
+              event.currentTarget.setPointerCapture?.(event.pointerId);
+            };
+            const axisPointerMove = (event) => {
+              if (!axisDragStart || !rollChartData[0]?.length) return;
+              event.preventDefault();
+              const rect = event.currentTarget.getBoundingClientRect();
+              const span = axisDragStart.max - axisDragStart.min;
+              if (axisDragStart.scaleKey === "x") {
+                const dx = event.clientX - axisDragStart.x;
+                const { min, max } = chartXBounds();
+                const shift = -(dx / Math.max(1, rect.width)) * span;
+                const range = clampRange(axisDragStart.min + shift, axisDragStart.max + shift, min, max, span);
+                u.setScale("x", range);
+                return;
+              }
+              const dy = event.clientY - axisDragStart.y;
+              const shift = (dy / Math.max(1, rect.height)) * span;
+              const range = clampRange(axisDragStart.min + shift, axisDragStart.max + shift, -Infinity, Infinity, span);
+              u.setScale(axisDragStart.scaleKey, range);
+            };
+            const axisPointerUp = (event) => {
+              axisDragStart = null;
+              event.currentTarget.releasePointerCapture?.(event.pointerId);
+            };
             const doubleClick = () => {
               setRollChartWindow();
               u.setScale("price", { min: null, max: null });
               u.setScale("iv", { min: null, max: null });
             };
+            const axisHandlers = [
+              { el: axisEls[0], scale: "x" },
+              { el: axisEls[1], scale: "iv" },
+              { el: axisEls[2], scale: "price" }
+            ].filter((item) => item.el);
+            for (const item of axisHandlers) {
+              item.wheel = axisWheel(item.scale);
+              item.pointerDown = axisPointerDown(item.scale);
+              item.el.addEventListener("wheel", item.wheel, { passive: false });
+              item.el.addEventListener("pointerdown", item.pointerDown);
+              item.el.addEventListener("pointermove", axisPointerMove);
+              item.el.addEventListener("pointerup", axisPointerUp);
+              item.el.addEventListener("pointercancel", axisPointerUp);
+              item.el.addEventListener("dblclick", doubleClick);
+            }
             over.addEventListener("wheel", wheel, { passive: false });
             over.addEventListener("pointerdown", pointerDown);
             over.addEventListener("pointermove", pointerMove);
@@ -2002,6 +2082,14 @@ function App() {
             over.addEventListener("pointercancel", pointerUp);
             over.addEventListener("dblclick", doubleClick);
             destroy = () => {
+              for (const item of axisHandlers) {
+                item.el.removeEventListener("wheel", item.wheel);
+                item.el.removeEventListener("pointerdown", item.pointerDown);
+                item.el.removeEventListener("pointermove", axisPointerMove);
+                item.el.removeEventListener("pointerup", axisPointerUp);
+                item.el.removeEventListener("pointercancel", axisPointerUp);
+                item.el.removeEventListener("dblclick", doubleClick);
+              }
               over.removeEventListener("wheel", wheel);
               over.removeEventListener("pointerdown", pointerDown);
               over.removeEventListener("pointermove", pointerMove);
