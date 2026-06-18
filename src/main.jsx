@@ -454,6 +454,7 @@ function App() {
     const height = Math.max(1, Math.floor(rect.height));
     if (typeof chart.setSize === "function") chart.setSize({ width, height });
     else chart.resize(width, height);
+    if (chart === rollChart) scheduleApplyRollManualScales();
   }
 
   function resizeVisibleCharts() {
@@ -1922,6 +1923,11 @@ function App() {
     rollManualScales = { ...rollManualScales, [key]: { min: range.min, max: range.max } };
   }
 
+  function scaleRangeChanged(current, saved) {
+    if (!current || !saved) return false;
+    return Math.abs(current.min - saved.min) > 1e-9 || Math.abs(current.max - saved.max) > 1e-9;
+  }
+
   function setRollScale(key, range, manual = false) {
     if (!rollChart || !range) return;
     rollChart.setScale(key, range);
@@ -1934,6 +1940,13 @@ function App() {
       const range = rollManualScales[key];
       if (range) rollChart.setScale(key, range);
     }
+  }
+
+  function scheduleApplyRollManualScales() {
+    requestAnimationFrame(() => {
+      applyRollManualScales();
+      requestAnimationFrame(applyRollManualScales);
+    });
   }
 
   function clearRollManualScales(keys = ["x", "price", "iv"]) {
@@ -1954,8 +1967,8 @@ function App() {
       const anchor = scale.min + span * pct;
       const nextSpan = span * factor;
       const range = clampRange(anchor - nextSpan * pct, anchor + nextSpan * (1 - pct), hardMin, hardMax, minSpan);
-      u.setScale(key, range);
       rememberRollScale(key, range);
+      u.setScale(key, range);
     };
     const panAxis = (u, key, pctDelta, hardMin, hardMax) => {
       const scale = u.scales[key];
@@ -1963,8 +1976,8 @@ function App() {
       const span = scale.max - scale.min;
       const shift = span * pctDelta;
       const range = clampRange(scale.min + shift, scale.max + shift, hardMin, hardMax, span);
-      u.setScale(key, range);
       rememberRollScale(key, range);
+      u.setScale(key, range);
     };
 
     return {
@@ -2016,6 +2029,7 @@ function App() {
             };
             const pointerDown = (event) => {
               if (event.button !== 0 || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+              scheduleApplyRollManualScales();
               dragStart = {
                 x: event.clientX,
                 min: u.scales.x.min,
@@ -2032,17 +2046,19 @@ function App() {
               const x = rollChartData[0];
               const shift = -(dx / rect.width) * span;
               const range = clampRange(dragStart.min + shift, dragStart.max + shift, x[0], x[x.length - 1], span);
-              u.setScale("x", range);
               rememberRollScale("x", range);
+              u.setScale("x", range);
             };
             const pointerUp = (event) => {
               dragStart = null;
               over.releasePointerCapture?.(event.pointerId);
+              scheduleApplyRollManualScales();
             };
             const axisPointerDown = (scaleKey) => (event) => {
               if (event.button !== 0 || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
               const scale = u.scales[scaleKey];
               if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
+              scheduleApplyRollManualScales();
               axisDragStart = {
                 scaleKey,
                 x: event.clientX,
@@ -2064,8 +2080,8 @@ function App() {
                 const factor = Math.exp(-dx / Math.max(120, rect.width));
                 const nextSpan = Math.max(10, span * factor);
                 const range = clampRange(mid - nextSpan / 2, mid + nextSpan / 2, min, max, 10);
-                u.setScale("x", range);
                 rememberRollScale("x", range);
+                u.setScale("x", range);
                 return;
               }
               const dy = event.clientY - axisDragStart.y;
@@ -2073,12 +2089,16 @@ function App() {
               const factor = Math.exp(dy / Math.max(120, rect.height));
               const nextSpan = Math.max(0.01, span * factor);
               const range = clampRange(mid - nextSpan / 2, mid + nextSpan / 2, -Infinity, Infinity, 0.01);
-              u.setScale(axisDragStart.scaleKey, range);
               rememberRollScale(axisDragStart.scaleKey, range);
+              u.setScale(axisDragStart.scaleKey, range);
             };
             const axisPointerUp = (event) => {
               axisDragStart = null;
               event.currentTarget.releasePointerCapture?.(event.pointerId);
+              scheduleApplyRollManualScales();
+            };
+            const keepManualScale = () => {
+              scheduleApplyRollManualScales();
             };
             const doubleClick = () => {
               clearRollManualScales();
@@ -2099,6 +2119,7 @@ function App() {
               item.el.addEventListener("pointermove", axisPointerMove);
               item.el.addEventListener("pointerup", axisPointerUp);
               item.el.addEventListener("pointercancel", axisPointerUp);
+              item.el.addEventListener("click", keepManualScale);
               item.el.addEventListener("dblclick", doubleClick);
             }
             over.addEventListener("wheel", wheel, { passive: false });
@@ -2106,7 +2127,7 @@ function App() {
             over.addEventListener("pointermove", pointerMove);
             over.addEventListener("pointerup", pointerUp);
             over.addEventListener("pointercancel", pointerUp);
-            over.addEventListener("dblclick", doubleClick);
+            over.addEventListener("click", keepManualScale);
             destroy = () => {
               for (const item of axisHandlers) {
                 item.el.removeEventListener("wheel", item.wheel);
@@ -2114,6 +2135,7 @@ function App() {
                 item.el.removeEventListener("pointermove", axisPointerMove);
                 item.el.removeEventListener("pointerup", axisPointerUp);
                 item.el.removeEventListener("pointercancel", axisPointerUp);
+                item.el.removeEventListener("click", keepManualScale);
                 item.el.removeEventListener("dblclick", doubleClick);
               }
               over.removeEventListener("wheel", wheel);
@@ -2121,8 +2143,22 @@ function App() {
               over.removeEventListener("pointermove", pointerMove);
               over.removeEventListener("pointerup", pointerUp);
               over.removeEventListener("pointercancel", pointerUp);
-              over.removeEventListener("dblclick", doubleClick);
+              over.removeEventListener("click", keepManualScale);
             };
+          }
+        ],
+        setScale: [
+          (u, key) => {
+            const keys = key ? [key] : ["x", "price", "iv"];
+            for (const scaleKey of keys) {
+              const saved = rollManualScales[scaleKey];
+              if (saved && scaleRangeChanged(u.scales[scaleKey], saved)) {
+                requestAnimationFrame(() => {
+                  const latest = rollManualScales[scaleKey];
+                  if (latest && scaleRangeChanged(u.scales[scaleKey], latest)) u.setScale(scaleKey, latest);
+                });
+              }
+            }
           }
         ],
         destroy: [() => destroy()]
