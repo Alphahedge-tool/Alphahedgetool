@@ -301,8 +301,13 @@ async function proxy(req, res) {
 
     const body = req.method === "GET" || req.method === "HEAD" ? undefined : await readBody(req);
     const headers = {};
-    for (const key of ["authorization", "x-device-id", "x-temp-token", "content-type"]) {
+    for (const key of ["authorization", "x-device-id", "x-temp-token", "content-type", "x-app-version", "x-device-os", "cookie"]) {
       if (req.headers[key]) headers[key] = req.headers[key];
+    }
+    if (headers["x-device-id"]) {
+      headers["x-app-version"] ||= "0.4.5";
+      headers["x-device-os"] ||= "sdk";
+      headers.cookie ||= `deviceId=${headers["x-device-id"]}`;
     }
 
     const upstream = await fetch(target, {
@@ -403,6 +408,7 @@ function attachLiveWebSocket(server) {
         token: input.token,
         deviceId: input.deviceId,
         symbol: input.symbol,
+        spotSymbol: input.spotSymbol,
         exchange: input.exchange,
         interval: input.interval,
         expiry: input.expiry,
@@ -410,6 +416,7 @@ function attachLiveWebSocket(server) {
       };
       liveLog("subscribe", {
         symbol: config.symbol,
+        spotSymbol: config.spotSymbol,
         exchange: config.exchange,
         expiry: config.expiry,
         refIds: config.refIds.length,

@@ -1,6 +1,8 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import { render } from "solid-js/web";
+import uPlot from "uplot";
 import "./styles.css";
+import "uplot/dist/uPlot.min.css";
 
 // Writes rows as a JSON file (saved with .parquet extension).
 // Each row is a plain object; field names match the CSV headers.
@@ -98,6 +100,56 @@ const MARKET_STRIP_SYMBOLS = [
   { label: "SENSEX", instrument: "SENSEX", exchange: "BSE" },
   { label: "INDIA VIX", instrument: "INDIA VIX", instruments: ["INDIA VIX", "INDIAVIX", "INDIA_VIX"], exchange: "NSE" }
 ];
+const INSTRUMENT_EXCHANGES = ["NSE", "BSE", "MCX"];
+const SYMBOL_CATEGORIES = [
+  { key: "all", label: "All" },
+  { key: "index", label: "Index" },
+  { key: "stock", label: "Stocks" },
+  { key: "future", label: "Futures" },
+  { key: "option", label: "Options" },
+  { key: "commodity", label: "Commodity" }
+];
+const INSTRUMENT_DB = "nubra-instrument-cache-v1";
+const INSTRUMENT_STORE = "masters";
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function openInstrumentDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(INSTRUMENT_DB, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(INSTRUMENT_STORE, { keyPath: "key" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Unable to open instrument cache."));
+  });
+}
+
+async function readInstrumentCache(key) {
+  const db = await openInstrumentDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(INSTRUMENT_STORE, "readonly");
+    const request = tx.objectStore(INSTRUMENT_STORE).get(key);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error("Unable to read instrument cache."));
+    tx.oncomplete = () => db.close();
+  });
+}
+
+async function writeInstrumentCache(record) {
+  const db = await openInstrumentDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(INSTRUMENT_STORE, "readwrite");
+    tx.objectStore(INSTRUMENT_STORE).put(record);
+    tx.oncomplete = () => {
+      db.close();
+      resolve(record);
+    };
+    tx.onerror = () => reject(tx.error || new Error("Unable to write instrument cache."));
+  });
+}
 
 function toLocalInput(date) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -208,6 +260,13 @@ function App() {
     ok: false
   })));
   const [marketStripStatus, setMarketStripStatus] = createSignal("Waiting for session");
+  const [scriptExchange, setScriptExchange] = createSignal(localStorage.getItem("nubraScriptExchange") || "NSE");
+  const [scriptUnderlying, setScriptUnderlying] = createSignal(localStorage.getItem("nubraScriptUnderlying") || "");
+  const [scriptCache, setScriptCache] = createSignal({ date: "", exchange: "", rows: [], downloadedAt: "" });
+  const [scriptStatus, setScriptStatus] = createSignal("Login to download scripts");
+  const [symbolSearchOpen, setSymbolSearchOpen] = createSignal(false);
+  const [symbolSearchText, setSymbolSearchText] = createSignal("");
+  const [symbolSearchCategory, setSymbolSearchCategory] = createSignal("all");
 
   const [symbol, setSymbol] = createSignal("NIFTY");
   const [instrumentType, setInstrumentType] = createSignal("INDEX");
@@ -243,6 +302,7 @@ function App() {
   const [rollLineValue, setRollLineValue] = createSignal("");
   const [rollLineTarget, setRollLineTarget] = createSignal("bid");
   const [rollDrawnLines, setRollDrawnLines] = createSignal([]);
+  const [rollWindowMode, setRollWindowMode] = createSignal("3h");
   let importFileRef;
 
   const [chainSymbol, setChainSymbol] = createSignal("NIFTY");
@@ -267,6 +327,9 @@ function App() {
   let rollBidSeries;
   let rollAskSeries;
   let rollIvSeries;
+  let rollChartLines = { bid: [], ask: [], iv: [] };
+  let rollChartData = [[], [], [], []];
+  let rollReferenceCount = 0;
   const rollPriceLines = new Map();
   let autoRollLoadedKey = "";
   let autoChainLoadedKey = "";
@@ -388,7 +451,8 @@ function App() {
     const rect = host.getBoundingClientRect();
     const width = Math.max(1, Math.floor(rect.width));
     const height = Math.max(1, Math.floor(rect.height));
-    chart.resize(width, height);
+    if (typeof chart.setSize === "function") chart.setSize({ width, height });
+    else chart.resize(width, height);
   }
 
   function resizeVisibleCharts() {
@@ -415,6 +479,8 @@ function App() {
     return {
       Authorization: rawToken.startsWith("Bearer ") ? rawToken : `Bearer ${rawToken}`,
       "x-device-id": deviceId().trim(),
+      "x-app-version": "0.4.5",
+      "x-device-os": "sdk",
       "content-type": "application/json"
     };
   }
@@ -440,6 +506,435 @@ function App() {
     return payload;
   }
 
+  function instrumentCacheKey(exchange = scriptExchange(), date = todayKey()) {
+    return `${environment().includes("uat") ? "uat" : "prod"}:${date}:${exchange}`;
+  }
+
+  function normalizeInstrumentRow(row, exchangeValue) {
+    const exchangeName = String(row.exchange || exchangeValue || "").toUpperCase();
+    const asset = String(row.asset || row.underlying || row.symbol || row.stock_name || "").trim().toUpperCase();
+    const symbolName = String(row.stock_name || row.symbol || row.display_name || row.displayName || asset).trim().toUpperCase();
+    const displayName = String(row.display_name || row.displayName || row.stock_name || row.symbol || row.zanskar_name || row.nubra_name || asset).trim();
+    const type = String(row.derivative_type || row.asset_type || (row.expiry ? "FUT" : "STOCK") || "").toUpperCase();
+    const assetType = String(row.asset_type || "").toUpperCase();
+    const expiry = row.expiry ? String(row.expiry) : "";
+    const optionType = String(row.option_type || row.ot || "").toUpperCase();
+    const strike = row.strike_price ?? row.sp ?? "";
+    const key = [
+      exchangeName,
+      row.ref_id ?? row.refId ?? row.token ?? "",
+      symbolName,
+      expiry,
+      optionType,
+      strike
+    ].join("|");
+    return {
+      key,
+      refId: row.ref_id ?? row.refId ?? null,
+      token: row.token ?? null,
+      exchange: exchangeName,
+      asset,
+      symbol: symbolName,
+      displayName,
+      type,
+      assetType,
+      expiry,
+      optionType,
+      strike,
+      lotSize: row.lot_size ?? "",
+      searchText: `${exchangeName} ${asset} ${symbolName} ${displayName} ${type} ${expiry} ${optionType}`.toUpperCase()
+    };
+  }
+
+  function sortInstruments(rows) {
+    return [...rows].sort((a, b) => {
+      const assetCompare = a.asset.localeCompare(b.asset);
+      if (assetCompare) return assetCompare;
+      const expiryCompare = String(a.expiry).localeCompare(String(b.expiry));
+      if (expiryCompare) return expiryCompare;
+      return a.symbol.localeCompare(b.symbol);
+    });
+  }
+
+  async function loadCachedScripts(exchangeValue = scriptExchange(), force = false) {
+    if (!authed()) {
+      setScriptStatus("Login to download scripts");
+      return [];
+    }
+    const exchangeName = String(exchangeValue || "NSE").toUpperCase();
+    const date = todayKey();
+    const key = instrumentCacheKey(exchangeName, date);
+    if (!force) {
+      const cached = await readInstrumentCache(key);
+      if (cached?.rows?.length) {
+        if (!Object.prototype.hasOwnProperty.call(cached.rows[0], "assetType")) {
+          return loadCachedScripts(exchangeName, true);
+        }
+        setScriptCache(cached);
+        setScriptStatus(`${exchangeName} ready: ${cached.rows.length.toLocaleString("en-IN")} instruments`);
+        return cached.rows;
+      }
+    }
+
+    setScriptStatus(`Downloading ${exchangeName} scripts`);
+    const data = await nubraFetch(`refdata/refdata/${date}?exchange=${exchangeName}`);
+    const rawRows = Array.isArray(data.refdata) ? data.refdata : [];
+    const rows = sortInstruments(rawRows.map((row) => normalizeInstrumentRow(row, exchangeName)));
+    const record = { key, date, exchange: exchangeName, rows, downloadedAt: new Date().toISOString() };
+    await writeInstrumentCache(record);
+    setScriptCache(record);
+    setScriptStatus(`${exchangeName} ready: ${rows.length.toLocaleString("en-IN")} instruments`);
+    return rows;
+  }
+
+  async function refreshAllScripts() {
+    if (!authed()) throw new Error("Login before downloading scripts.");
+    let total = 0;
+    for (const exchangeName of INSTRUMENT_EXCHANGES) {
+      const rows = await loadCachedScripts(exchangeName, true);
+      total += rows.length;
+    }
+    await loadCachedScripts(scriptExchange(), false);
+    setScriptStatus(`All exchanges ready: ${total.toLocaleString("en-IN")} instruments`);
+  }
+
+  function scriptKind(script) {
+    const type = String(script?.type || "").toUpperCase();
+    if (type.includes("OPT")) return "OPT";
+    if (type.includes("FUT")) return "FUT";
+    if (["INDEX", "IDX"].includes(type)) return "INDEX";
+    if (String(script?.exchange || "").toUpperCase() === "MCX" && script?.expiry) return "FUT";
+    return "STOCK";
+  }
+
+  function categoryForKinds(kinds) {
+    if (kinds.has("INDEX")) return "index";
+    if (kinds.has("STOCK")) return "stock";
+    if (kinds.has("FUT")) return "future";
+    if (kinds.has("OPT")) return "option";
+    return "stock";
+  }
+
+  function categoryLabel(category) {
+    return SYMBOL_CATEGORIES.find((item) => item.key === category)?.label || category;
+  }
+
+  function getScriptUnderlying(script) {
+    return String(script?.asset || script?.symbol || "").trim().toUpperCase();
+  }
+
+  function expirySortValue(expiry) {
+    const n = Number(expiry);
+    return Number.isFinite(n) && n > 0 ? n : Number.MAX_SAFE_INTEGER;
+  }
+
+  function mcxFutureForAsset(assetValue, expiryValue = "") {
+    const asset = String(assetValue || "").trim().toUpperCase();
+    const expiry = String(expiryValue || "");
+    if (!asset) return null;
+    const rows = (scriptCache().rows || []).filter((row) =>
+      row.exchange === "MCX" &&
+      (row.asset === asset || row.symbol === asset) &&
+      scriptKind(row) === "FUT"
+    );
+    if (!rows.length) return null;
+    const exact = expiry ? rows.find((row) => String(row.expiry) === expiry) : null;
+    const row = exact || [...rows].sort((a, b) => expirySortValue(a.expiry) - expirySortValue(b.expiry))[0];
+    const symbol = preferredMcxFutureAlias(row);
+    return symbol ? { ...row, symbol } : row;
+  }
+
+  function mcxMarketSymbol(symbolValue, expiryValue = "") {
+    const sym = String(symbolValue || "").trim().toUpperCase();
+    if (!sym) return "";
+    if (sym.startsWith("FUT_")) return sym;
+    return mcxFutureForAsset(sym, expiryValue)?.symbol || sym;
+  }
+
+  async function resolveMcxMarketSymbol(symbolValue, expiryValue = "") {
+    const sym = String(symbolValue || "").trim().toUpperCase();
+    if (!sym || sym.startsWith("FUT_")) return sym;
+    const cached = mcxMarketSymbol(sym, expiryValue);
+    if (cached && cached !== sym) return cached;
+    const date = rollStart().slice(0, 10) || todayKey();
+    const data = await nubraFetch(`refdata/refdata/${date}?exchange=MCX`);
+    const rows = (Array.isArray(data.refdata) ? data.refdata : [])
+      .filter((row) =>
+        String(row.asset || row.underlying || "").trim().toUpperCase() === sym &&
+        String(row.derivative_type || row.asset_type || "").toUpperCase().includes("FUT")
+      )
+      .map((row) => {
+        const normalized = normalizeInstrumentRow(row, "MCX");
+        const symbol = preferredMcxFutureAlias(row);
+        return symbol ? { ...normalized, symbol } : normalized;
+      })
+      .filter((row) => row.symbol);
+    if (!rows.length) return sym;
+    const expiry = String(expiryValue || "");
+    const exact = expiry ? rows.find((row) => String(row.expiry) === expiry) : null;
+    return (exact || rows.sort((a, b) => expirySortValue(a.expiry) - expirySortValue(b.expiry))[0]).symbol;
+  }
+
+  function preferredScriptForUnderlying(assetValue) {
+    const asset = String(assetValue || "").trim().toUpperCase();
+    const rows = (scriptCache().rows || []).filter((row) => row.asset === asset || row.symbol === asset);
+    if (!rows.length) return null;
+    const ranked = [...rows].sort((a, b) => {
+      const aKind = scriptKind(a);
+      const bKind = scriptKind(b);
+      const preferred = section() === "market"
+        ? ["INDEX", "STOCK", "FUT", "OPT"]
+        : ["OPT", "FUT", "INDEX", "STOCK"];
+      const kindCompare = preferred.indexOf(aKind) - preferred.indexOf(bKind);
+      if (kindCompare) return kindCompare;
+      return expirySortValue(a.expiry) - expirySortValue(b.expiry);
+    });
+    return ranked[0];
+  }
+
+  function preferredScriptForSearchItem(item) {
+    if (!item) return null;
+    const rows = scriptCache().rows || [];
+    if (item.rowKey) {
+      const exact = rows.find((row) => row.key === item.rowKey);
+      if (exact) return { ...exact, selectedCategory: item.category };
+    }
+    if (item.category === "commodity") {
+      const future = mcxFutureForAsset(item.asset, item.expiry);
+      if (future) return { ...future, selectedCategory: item.category };
+    }
+    const matches = rows.filter((row) => {
+      if ((row.asset || row.symbol) !== item.asset) return false;
+      if (item.expiry && String(row.expiry) !== String(item.expiry)) return false;
+      if (item.category === "future") return scriptKind(row) === "FUT";
+      if (item.category === "option") return scriptKind(row) === "OPT";
+      if (item.category === "stock") return scriptKind(row) === "STOCK";
+      return true;
+    });
+    if (matches.length) return { ...matches.sort((a, b) => expirySortValue(a.expiry) - expirySortValue(b.expiry))[0], selectedCategory: item.category };
+    const fallback = preferredScriptForUnderlying(item.asset);
+    return fallback ? { ...fallback, selectedCategory: item.category } : null;
+  }
+
+  function expiriesForUnderlying(assetValue = scriptUnderlying()) {
+    const asset = String(assetValue || "").trim().toUpperCase();
+    return [...new Set((scriptCache().rows || [])
+      .filter((row) => (row.asset === asset || row.symbol === asset) && row.expiry)
+      .map((row) => String(row.expiry)))]
+      .sort((a, b) => expirySortValue(a) - expirySortValue(b));
+  }
+
+  function setUnifiedExpiry(expiry) {
+    setRollExpiry(expiry);
+    setChainExpiry(expiry);
+    setRollExpiries((items) => items.includes(expiry) || !expiry ? items : [expiry, ...items]);
+    setChainExpiries((items) => items.includes(expiry) || !expiry ? items : [expiry, ...items]);
+  }
+
+  function setUnifiedStart(value) {
+    setRollStart(value);
+    setStartDate(value);
+  }
+
+  function setUnifiedEnd(value) {
+    setRollEnd(value);
+    setEndDate(value);
+  }
+
+  async function applyScript(script) {
+    if (!script) return;
+    const exchangeName = String(script.exchange || scriptExchange()).toUpperCase();
+    const kind = scriptKind(script);
+    const underlying = getScriptUnderlying(script);
+    const tradableSymbol = String(script.symbol || underlying).trim().toUpperCase();
+    const isIndexAsset = String(script.assetType || "").toUpperCase().includes("INDEX");
+    const selectedCategory = String(script.selectedCategory || "").toLowerCase();
+    const chartType = selectedCategory === "index" || (isIndexAsset && section() === "market")
+      ? "INDEX"
+      : kind === "OPT" || kind === "FUT"
+        ? kind
+        : exchangeName === "MCX"
+          ? "FUT"
+          : "STOCK";
+    const displaySymbol = chartType === "INDEX" ? underlying : tradableSymbol;
+
+    setScriptUnderlying(underlying || tradableSymbol);
+    localStorage.setItem("nubraScriptUnderlying", underlying || tradableSymbol);
+
+    setSymbol(displaySymbol);
+    setInstrumentType(chartType);
+    setExchange(exchangeName);
+
+    stopChainLive();
+    setChainSymbol(underlying || tradableSymbol);
+    setChainExchange(exchangeName);
+    setChainData(null);
+    const expiries = expiriesForUnderlying(underlying || tradableSymbol);
+    const selectedExpiry = script.expiry || expiries[0] || "";
+    setChainExpiries(expiries);
+    setChainExpiry(selectedExpiry);
+
+    setRollSymbol(chartType === "INDEX" ? underlying : underlying || tradableSymbol);
+    setRollType(chartType === "INDEX" ? "INDEX" : exchangeName === "MCX" ? "FUT" : "STOCK");
+    setRollExchange(exchangeName);
+    setRollExpiry(selectedExpiry);
+    setRollExpiries(expiries);
+
+    if (section() === "market") {
+      await loadSpotPrice();
+      await loadPriceChart();
+      return;
+    }
+    if (section() === "chain") {
+      autoChainLoadedKey = "";
+      await loadOptionChain();
+      return;
+    }
+    autoRollLoadedKey = "";
+    await loadRollingStraddle();
+  }
+
+  const scriptUnderlyings = createMemo(() => {
+    const grouped = new Map();
+    for (const row of scriptCache().rows || []) {
+      const asset = row.asset || row.symbol;
+      if (!asset) continue;
+      const current = grouped.get(asset) || {
+        asset,
+        exchange: row.exchange,
+        displayName: row.displayName || asset,
+        types: new Set(),
+        expiries: new Set(),
+        count: 0
+      };
+      if (String(row.assetType || "").toUpperCase().includes("INDEX")) current.types.add("INDEX");
+      current.types.add(scriptKind(row));
+      if (row.expiry) current.expiries.add(row.expiry);
+      current.count += 1;
+      grouped.set(asset, current);
+    }
+    return [...grouped.values()]
+      .map((item) => ({
+        ...item,
+        typesText: [...item.types].sort().join("/"),
+        expiryText: [...item.expiries].sort()[0] || "",
+        label: `${item.asset} | ${item.exchange} | ${[...item.types].sort().join("/")}${item.expiries.size ? ` | ${[...item.expiries].sort()[0]}` : ""}`
+      }))
+      .sort((a, b) => a.asset.localeCompare(b.asset));
+  });
+
+  const symbolSearchItems = createMemo(() => {
+    const rows = scriptCache().rows || [];
+    const items = [];
+    const seen = new Set();
+    const addItem = (item) => {
+      const key = [item.category, item.exchange, item.asset, item.expiry || "", item.symbol || ""].join("|");
+      if (seen.has(key)) return;
+      seen.add(key);
+      items.push({
+        ...item,
+        searchText: [
+          item.asset,
+          item.symbol,
+          item.title,
+          item.subtitle,
+          item.exchange,
+          item.category,
+          categoryLabel(item.category),
+          item.category === "future" ? "FUT FUTURE FUTURES" : "",
+          item.category === "option" ? "OPT OPTION OPTIONS CE PE" : "",
+          item.category === "commodity" ? "COMMODITY MCX" : "",
+          item.category === "index" ? "INDEX INDICES" : ""
+        ].filter(Boolean).join(" ").toUpperCase()
+      });
+    };
+
+    for (const item of scriptUnderlyings()) {
+      if (item.types.has("INDEX")) {
+        addItem({
+          category: "index",
+          asset: item.asset,
+          symbol: item.asset,
+          exchange: item.exchange,
+          title: item.asset,
+          subtitle: `${item.asset} Index`,
+          badge: item.asset.slice(0, 2)
+        });
+      }
+      if (item.types.has("STOCK")) {
+        addItem({
+          category: "stock",
+          asset: item.asset,
+          symbol: item.asset,
+          exchange: item.exchange,
+          title: item.asset,
+          subtitle: "Equity",
+          badge: item.asset.slice(0, 2)
+        });
+      }
+    }
+
+    for (const row of rows) {
+      const kind = scriptKind(row);
+      const asset = row.asset || row.symbol;
+      if (!asset) continue;
+      if (kind === "FUT") {
+        if (row.exchange === "MCX") {
+          addItem({
+            category: "commodity",
+            asset,
+            symbol: row.symbol,
+            exchange: row.exchange,
+            title: asset,
+            subtitle: row.expiry ? `Commodity FUT · ${row.expiry}` : "Commodity FUT",
+            expiry: row.expiry,
+            rowKey: row.key,
+            badge: asset.slice(0, 2)
+          });
+        }
+        addItem({
+          category: "future",
+          asset,
+          symbol: row.symbol,
+          exchange: row.exchange,
+          title: `${asset} FUT`,
+          subtitle: row.expiry ? `Futures · ${row.expiry}` : "Futures",
+          expiry: row.expiry,
+          rowKey: row.key,
+          badge: "FU"
+        });
+      }
+      if (kind === "OPT") {
+        addItem({
+          category: "option",
+          asset,
+          symbol: row.symbol,
+          exchange: row.exchange,
+          title: `${asset} OPTIONS`,
+          subtitle: row.expiry ? `Options chain · ${row.expiry}` : "Options chain",
+          expiry: row.expiry,
+          rowKey: row.key,
+          badge: "OP"
+        });
+      }
+    }
+
+    const order = { index: 0, stock: 1, future: 2, option: 3, commodity: 4 };
+    return items.sort((a, b) => (order[a.category] ?? 9) - (order[b.category] ?? 9) || a.asset.localeCompare(b.asset) || String(a.expiry || "").localeCompare(String(b.expiry || "")));
+  });
+
+  const symbolSearchResults = createMemo(() => {
+    const query = symbolSearchText().trim().toUpperCase();
+    const activeCategory = symbolSearchCategory();
+    return symbolSearchItems()
+      .filter((item) => {
+        if (activeCategory !== "all" && item.category !== activeCategory) return false;
+        if (!query) return true;
+        return query.split(/\s+/).every((part) => item.searchText.includes(part));
+      })
+      .slice(0, 120);
+  });
+
   async function loadMarketStrip() {
     if (!authed()) {
       setMarketStripStatus("Waiting for session");
@@ -448,9 +943,8 @@ function App() {
     const results = await Promise.all(MARKET_STRIP_SYMBOLS.map(async (item) => {
       let lastError = "";
       for (const instrument of item.instruments || [item.instrument]) {
-        const path = item.exchange === "BSE"
-          ? `optionchains/${encodeURIComponent(instrument)}/price?exchange=BSE`
-          : `optionchains/${encodeURIComponent(instrument)}/price`;
+        const suffix = item.exchange && item.exchange !== "NSE" ? `?exchange=${encodeURIComponent(item.exchange)}` : "";
+        const path = `optionchains/${encodeURIComponent(instrument)}/price${suffix}`;
         try {
           const data = await nubraFetch(path);
           return {
@@ -548,6 +1042,11 @@ function App() {
     setFlowId("");
     sessionStorage.removeItem("nubraFlowId");
     setLoginStatus(data.message || "Logged in");
+    try {
+      await refreshAllScripts();
+    } catch (error) {
+      setScriptStatus(error.message || "Script download failed");
+    }
   }
 
   function initPriceChart() {
@@ -577,8 +1076,12 @@ function App() {
 
   async function loadSpotPrice() {
     setChartStatus("Spot");
-    const suffix = exchange() === "BSE" ? "?exchange=BSE" : "";
-    const data = await nubraFetch(`optionchains/${encodeURIComponent(symbol().trim().toUpperCase())}/price${suffix}`);
+    const exchangeName = exchange();
+    const priceSymbol = exchangeName === "MCX"
+      ? mcxMarketSymbol(symbol(), chainExpiry() || rollExpiry())
+      : symbol().trim().toUpperCase();
+    const suffix = exchangeName !== "NSE" ? `?exchange=${encodeURIComponent(exchangeName)}` : "";
+    const data = await nubraFetch(`optionchains/${encodeURIComponent(priceSymbol)}/price${suffix}`);
     const price = toRupees(data.price);
     setSpot(price == null ? "--" : rupee.format(price));
     setChange(Number.isFinite(data.change) ? `${number.format(data.change)}%` : "--");
@@ -589,13 +1092,17 @@ function App() {
     initPriceChart();
     if (!candleSeries) throw new Error("Chart engine is still loading. Try Load Chart again in a moment.");
     setChartStatus("Loading");
-    const sym = symbol().trim().toUpperCase();
+    const exchangeName = exchange();
+    const sym = exchangeName === "MCX"
+      ? mcxMarketSymbol(symbol(), chainExpiry() || rollExpiry())
+      : symbol().trim().toUpperCase();
+    const type = exchangeName === "MCX" && sym.startsWith("FUT_") ? "FUT" : instrumentType();
     const data = await nubraFetch("charts/timeseries", {
       method: "POST",
       body: JSON.stringify({
         query: [{
-          exchange: exchange(),
-          type: instrumentType(),
+          exchange: exchangeName,
+          type,
           values: [sym],
           fields: ["open", "high", "low", "close"],
           startDate: fromLocalInput(startDate()),
@@ -638,6 +1145,26 @@ function App() {
     return String(row.option_type || row.ot || row.side || "").toUpperCase();
   }
 
+  function optionSymbolAliases(row) {
+    return [...new Set([
+      row.stock_name,
+      row.symbol,
+      row.trading_symbol,
+      row.tradingsymbol,
+      row.display_name,
+      row.displayName,
+      row.zanskar_name,
+      row.nubra_name
+    ]
+      .map((value) => String(value || "").trim().toUpperCase())
+      .filter(Boolean))];
+  }
+
+  function preferredMcxFutureAlias(row) {
+    const aliases = optionSymbolAliases(row);
+    return aliases.find((alias) => alias.startsWith("FUT_")) || aliases[0] || "";
+  }
+
   async function rollingOptionRows() {
     const date = rollStart().slice(0, 10) || new Date().toISOString().slice(0, 10);
     const data = await nubraFetch(`refdata/refdata/${date}?exchange=${rollExchange()}`);
@@ -648,16 +1175,20 @@ function App() {
         const asset = String(row.asset || "").toUpperCase();
         const dtype = String(row.derivative_type || "").toUpperCase();
         const side = optionRowSide(row);
-        return asset === sym && dtype === "OPT" && (side === "CE" || side === "PE") && row.stock_name;
+        return asset === sym && dtype === "OPT" && (side === "CE" || side === "PE") && optionSymbolAliases(row).length;
       })
-      .map((row) => ({
-        name: row.stock_name,
-        refId: liveRefId(row),
-        expiry: String(row.expiry || ""),
-        side: optionRowSide(row),
-        strike: normalizeStrike(row.strike_price)
-      }))
-      .filter((row) => Number.isFinite(row.strike) && row.expiry && row.refId);
+      .map((row) => {
+        const aliases = optionSymbolAliases(row);
+        return {
+          name: aliases[0],
+          aliases,
+          refId: liveRefId(row),
+          expiry: String(row.expiry || ""),
+          side: optionRowSide(row),
+          strike: normalizeStrike(row.strike_price)
+        };
+      })
+      .filter((row) => Number.isFinite(row.strike) && row.expiry && row.name);
   }
 
   async function loadRollingExpiries() {
@@ -835,42 +1366,81 @@ function App() {
       Math.abs(strike - target) < Math.abs(best - target) ? strike : best, strikes[0]);
   }
 
-  async function fetchRollingSeries(names, start, end) {
+  function symbolDataHasPoints(symData) {
+    return ["l1bid", "l1ask", "iv_bid", "iv_ask", "iv_mid", "close", "open", "high", "low"].some((field) =>
+      Array.isArray(symData?.[field]) && symData[field].length
+    );
+  }
+
+  async function fetchRollingSeries(names, start, end, aliasToCanonical = new Map()) {
     const seriesByName = new Map();
     const batchSize = 8;
     const total = Math.ceil(names.length / batchSize);
     for (let b = 0; b < total; b++) {
       const batch = names.slice(b * batchSize, (b + 1) * batchSize);
       setRollStatus(`Batch ${b + 1}/${total}`);
-      const data = await nubraFetch("charts/timeseries", {
-        method: "POST",
-        body: JSON.stringify({
-          query: [{
-            exchange: rollExchange(),
-            type: "OPT",
-            values: batch,
-            fields: ["l1bid", "l1ask", "iv_bid", "iv_ask"],
-            startDate: start,
-            endDate: end,
-            interval: "1s",
-            intraDay: false,
-            realTime: false
-          }]
-        })
-      });
-      for (const entry of data?.result?.[0]?.values || []) {
+      const requests = rollExchange() === "MCX"
+        ? [
+            { type: "OPT", fields: ["l1bid", "l1ask", "iv_bid", "iv_ask", "iv_mid", "close"] },
+            { type: "CHAIN", fields: ["l1bid", "l1ask", "iv_bid", "iv_ask", "iv_mid", "close"] }
+          ]
+        : [{ type: "OPT", fields: ["l1bid", "l1ask", "iv_bid", "iv_ask"] }];
+      let values = [];
+      let lastError = null;
+      for (const request of requests) {
+        try {
+          const data = await nubraFetch("charts/timeseries", {
+            method: "POST",
+            body: JSON.stringify({
+              query: [{
+                exchange: rollExchange(),
+                type: request.type,
+                values: batch,
+                fields: request.fields,
+                startDate: start,
+                endDate: end,
+                interval: "1s",
+                intraDay: false,
+                realTime: false
+              }]
+            })
+          });
+          values = data?.result?.[0]?.values || [];
+          if (values.some((entry) => Object.values(entry || {}).some(symbolDataHasPoints))) break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (!values.length && lastError) throw lastError;
+      for (const entry of values) {
         for (const [name, symData] of Object.entries(entry)) {
+          const keyName = String(name || "").toUpperCase();
+          if (!symbolDataHasPoints(symData)) continue;
+          const canonicalName = aliasToCanonical.get(keyName) || keyName;
           const parsePoints = (arr, rupee = false) =>
             (Array.isArray(arr) ? arr : [])
               .map((p) => ({ ts: pointMs(p), v: pointNumber(p, rupee) }))
               .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.v))
               .sort((a, b) => a.ts - b.ts);
-          seriesByName.set(name, {
-            bid:    parsePoints(symData?.l1bid, true),
-            ask:    parsePoints(symData?.l1ask, true),
-            ivBid:  parsePoints(symData?.iv_bid, false),
-            ivAsk:  parsePoints(symData?.iv_ask, false)
-          });
+          const close = parsePoints(symData?.close, true);
+          const open = parsePoints(symData?.open, true);
+          const bid = parsePoints(symData?.l1bid, true);
+          const ask = parsePoints(symData?.l1ask, true);
+          const ivMid = parsePoints(symData?.iv_mid, false);
+          const priceFallback = close.length ? close : open;
+          const series = {
+            bid: bid.length ? bid : priceFallback,
+            ask: ask.length ? ask : priceFallback,
+            ivBid: parsePoints(symData?.iv_bid, false),
+            ivAsk: parsePoints(symData?.iv_ask, false),
+            ivMid
+          };
+          if ((series.bid.length || series.ask.length) && !seriesByName.has(canonicalName)) {
+            seriesByName.set(canonicalName, series);
+          }
+          if ((series.bid.length || series.ask.length) && !seriesByName.has(keyName)) {
+            seriesByName.set(keyName, series);
+          }
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -879,9 +1449,10 @@ function App() {
   }
 
   function advanceQuote(name, seriesByName, cursorByName, ts) {
-    const series = seriesByName.get(name);
-    if (!series) return { bid: 0, ask: 0, ivBid: null, ivAsk: null };
-    const cursor = cursorByName.get(name) || { bidIndex: 0, askIndex: 0, ivBidIndex: 0, ivAskIndex: 0, bid: 0, ask: 0, ivBid: null, ivAsk: null };
+    const keyName = String(name || "").toUpperCase();
+    const series = seriesByName.get(keyName);
+    if (!series) return { bid: 0, ask: 0, ivBid: null, ivAsk: null, ivMid: null };
+    const cursor = cursorByName.get(keyName) || { bidIndex: 0, askIndex: 0, ivBidIndex: 0, ivAskIndex: 0, ivMidIndex: 0, bid: 0, ask: 0, ivBid: null, ivAsk: null, ivMid: null };
     while (cursor.bidIndex < series.bid.length && series.bid[cursor.bidIndex].ts <= ts) {
       cursor.bid = series.bid[cursor.bidIndex].v;
       cursor.bidIndex += 1;
@@ -898,7 +1469,11 @@ function App() {
       cursor.ivAsk = series.ivAsk[cursor.ivAskIndex].v;
       cursor.ivAskIndex += 1;
     }
-    cursorByName.set(name, cursor);
+    while (cursor.ivMidIndex < (series.ivMid?.length || 0) && series.ivMid[cursor.ivMidIndex].ts <= ts) {
+      cursor.ivMid = series.ivMid[cursor.ivMidIndex].v;
+      cursor.ivMidIndex += 1;
+    }
+    cursorByName.set(keyName, cursor);
     return cursor;
   }
 
@@ -955,28 +1530,72 @@ function App() {
     visit(payload);
   }
 
-  function animateSeriesPoint(series, key, time, value) {
-    if (!series || !rollLiveContext || !Number.isFinite(value)) return;
-    const from = rollLiveContext.lastValues[key];
-    const start = Number.isFinite(from) ? from : value;
-    const duration = 420;
+  function withPreviewPoint(baseData, time, bid, ask, iv) {
+    const data = baseData.map((series) => series.slice());
+    const x = data[0];
+    let index = x.length - 1;
+    if (index >= 0 && x[index] === time) {
+      data[1][index] = bid;
+      data[2][index] = ask;
+      data[3][index] = iv;
+    } else {
+      x.push(time);
+      data[1].push(bid);
+      data[2].push(ask);
+      data[3].push(iv);
+      for (let i = 4; i < data.length; i += 1) {
+        const line = rollDrawnLines()[i - 4];
+        data[i].push(line ? line.value : null);
+      }
+    }
+    return data;
+  }
+
+  function drawRollPreview(data) {
+    if (!rollChart) return;
+    rollChartData = data;
+    rollChart.setData(rollChartData);
+    setRollChartWindow();
+  }
+
+  function animateRollChartSnapshot(time, target, commit) {
+    if (!rollLiveContext || !rollChart) {
+      commit();
+      return;
+    }
+    const start = {
+      bid: Number.isFinite(rollLiveContext.lastValues.bid) ? rollLiveContext.lastValues.bid : target.bid,
+      ask: Number.isFinite(rollLiveContext.lastValues.ask) ? rollLiveContext.lastValues.ask : target.ask,
+      iv: Number.isFinite(rollLiveContext.lastValues.iv) ? rollLiveContext.lastValues.iv : target.ivMid
+    };
+    const baseData = rollChartData.map((series) => series.slice());
     const started = performance.now();
+    const duration = 620;
+
+    if (rollLiveContext.frames.live) cancelAnimationFrame(rollLiveContext.frames.live);
 
     const step = (now) => {
-      if (!rollLiveContext) return;
+      if (!rollLiveContext || !rollChart) return;
       const progress = Math.min(1, (now - started) / duration);
       const eased = 1 - Math.pow(1 - progress, 3);
-      series.update({ time, value: start + (value - start) * eased });
-      if (progress < 1) rollLiveContext.frames[key] = requestAnimationFrame(step);
-      else {
-        series.update({ time, value });
-        rollLiveContext.lastValues[key] = value;
-        rollLiveContext.frames[key] = null;
+      const bid = start.bid + (target.bid - start.bid) * eased;
+      const ask = start.ask + (target.ask - start.ask) * eased;
+      const iv = target.ivMid == null || !Number.isFinite(start.iv)
+        ? target.ivMid
+        : start.iv + (target.ivMid - start.iv) * eased;
+      drawRollPreview(withPreviewPoint(baseData, time, bid, ask, iv));
+      if (progress < 1) {
+        rollLiveContext.frames.live = requestAnimationFrame(step);
+        return;
       }
+      rollLiveContext.frames.live = null;
+      rollLiveContext.lastValues.bid = target.bid;
+      rollLiveContext.lastValues.ask = target.ask;
+      if (target.ivMid != null) rollLiveContext.lastValues.iv = target.ivMid;
+      commit();
     };
 
-    if (rollLiveContext.frames[key]) cancelAnimationFrame(rollLiveContext.frames[key]);
-    rollLiveContext.frames[key] = requestAnimationFrame(step);
+    rollLiveContext.frames.live = requestAnimationFrame(step);
   }
 
   function readLiveLeg(row) {
@@ -985,7 +1604,16 @@ function App() {
     const book = refId ? rollLiveContext.orderbookByRef.get(refId) : null;
     const greek = refId ? rollLiveContext.greeksByRef.get(refId) : null;
     const optionTick = refId ? rollLiveContext.optionByRef.get(refId) : null;
-    const fallbackPrice = toRupees(row.last_traded_price);
+    const fallbackPrice = toRupees(
+      book?.last_traded_price ??
+      book?.ltp ??
+      optionTick?.last_traded_price ??
+      optionTick?.ltp ??
+      greek?.last_traded_price ??
+      greek?.ltp ??
+      row.last_traded_price ??
+      row.ltp
+    );
     return {
       bid: firstPriceLevel(book?.bids) ?? fallbackPrice,
       ask: firstPriceLevel(book?.asks) ?? fallbackPrice,
@@ -995,7 +1623,7 @@ function App() {
   }
 
   function updateRollLiveSnapshot(receivedAtMs = Date.now()) {
-    if (!rollLiveContext || !rollBidSeries || !rollAskSeries) return;
+    if (!rollLiveContext || !rollChart) return;
     const { strikes, rowByKey, optionByRef, step, spot } = rollLiveContext;
     if (!spot || spot <= 0) return;
 
@@ -1025,32 +1653,38 @@ function App() {
     }
 
     const time = tvTime(receivedAtMs);
-    animateSeriesPoint(rollBidSeries, "bid", time, best.bid);
-    animateSeriesPoint(rollAskSeries, "ask", time, best.ask);
-    if (best.ivMid != null && rollIvSeries) animateSeriesPoint(rollIvSeries, "iv", time, best.ivMid);
+    animateRollChartSnapshot(time, best, () => {
+      setRollChartLines(
+        [...rollChartLines.bid, { time, value: best.bid }],
+        [...rollChartLines.ask, { time, value: best.ask }],
+        best.ivMid != null ? [...rollChartLines.iv, { time, value: best.ivMid }] : rollChartLines.iv,
+        false
+      );
+      setRollChartWindow();
 
-    const nextRow = {
-      ts: receivedAtMs,
-      spot,
-      strike: best.strike,
-      bid: best.bid,
-      ask: best.ask,
-      mid: best.mid,
-      ivMid: best.ivMid
-    };
-    rollLiveContext.points += 1;
-    setRollExportData((rows) => [...rows, nextRow]);
-    setRollStats((prev) => ({
-      ...prev,
-      spot: rupee.format(spot),
-      strike: number.format(best.strike),
-      bid: rupee.format(best.bid),
-      ask: rupee.format(best.ask),
-      iv: best.ivMid != null ? `${best.ivMid.toFixed(1)}%` : prev.iv,
-      points: String((Number(prev.points) || 0) + 1),
-      meta: `${rollSymbol().trim().toUpperCase()} ${rollExpiry()} | live 1-second ${best.hasBook ? "bid/ask" : "LTP fallback"} | ${rollExchange()}`
-    }));
-    setRollStatus(best.hasBook ? "Live" : "Live LTP fallback");
+      const nextRow = {
+        ts: receivedAtMs,
+        spot,
+        strike: best.strike,
+        bid: best.bid,
+        ask: best.ask,
+        mid: best.mid,
+        ivMid: best.ivMid
+      };
+      rollLiveContext.points += 1;
+      setRollExportData((rows) => [...rows, nextRow]);
+      setRollStats((prev) => ({
+        ...prev,
+        spot: rupee.format(spot),
+        strike: number.format(best.strike),
+        bid: rupee.format(best.bid),
+        ask: rupee.format(best.ask),
+        iv: best.ivMid != null ? `${best.ivMid.toFixed(1)}%` : prev.iv,
+        points: String((Number(prev.points) || 0) + 1),
+        meta: `${rollSymbol().trim().toUpperCase()} ${rollExpiry()} | live 1-second animated ${best.hasBook ? "bid/ask" : "LTP fallback"} | ${rollExchange()}`
+      }));
+      setRollStatus(best.hasBook ? "Live animated" : "Live animated LTP");
+    });
   }
 
   function scheduleRollLiveUpdate(receivedAtMs) {
@@ -1116,6 +1750,7 @@ function App() {
         token: token().replace("Bearer ", "").trim(),
         deviceId: deviceId().trim(),
         symbol: rollSymbol().trim().toUpperCase(),
+        spotSymbol: rollLiveContext.spotSymbol || rollSymbol().trim().toUpperCase(),
         exchange: rollExchange(),
         interval: "1m",
         expiry,
@@ -1148,7 +1783,7 @@ function App() {
       for (const frame of Object.values(rollLiveContext.frames)) {
         if (frame) cancelAnimationFrame(frame);
       }
-      rollLiveContext.frames = { bid: null, ask: null, iv: null };
+      rollLiveContext.frames = { bid: null, ask: null, iv: null, live: null };
     }
     if (rollLiveSocket) {
       try { rollLiveSocket.send(JSON.stringify({ type: "stop" })); } catch {}
@@ -1157,12 +1792,6 @@ function App() {
     }
     setRollLive(false);
     setRollStatus("Idle");
-  }
-
-  function rollLineSeries(target = rollLineTarget()) {
-    if (target === "ask") return rollAskSeries;
-    if (target === "iv") return rollIvSeries;
-    return rollBidSeries;
   }
 
   function rollLineColor(target = rollLineTarget()) {
@@ -1178,9 +1807,8 @@ function App() {
 
   function addRollLine() {
     initRollChart();
-    const series = rollLineSeries();
     const value = Number(rollLineValue());
-    if (!series || !Number.isFinite(value)) {
+    if (!rollChart || !Number.isFinite(value)) {
       setRollStatus("Enter line value");
       return;
     }
@@ -1188,31 +1816,19 @@ function App() {
     const target = rollLineTarget();
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const title = rollLineTitle(rollLineName().trim(), target);
-    const handle = series.createPriceLine({
-      price: value,
-      color: rollLineColor(target),
-      lineWidth: 2,
-      lineStyle: 2,
-      axisLabelVisible: true,
-      title
-    });
-    rollPriceLines.set(id, { series, handle });
     setRollDrawnLines((lines) => [...lines, { id, name: title, value, target }]);
+    rebuildRollChart();
     setRollLineName("");
     setRollLineValue("");
     setRollStatus(`Line added: ${title}`);
   }
 
   function removeRollLine(id) {
-    const item = rollPriceLines.get(id);
-    if (item) {
-      item.series.removePriceLine(item.handle);
-      rollPriceLines.delete(id);
-    }
     setRollDrawnLines((lines) => lines.filter((line) => line.id !== id));
+    rebuildRollChart();
   }
 
-  function initRollChart() {
+  function initRollChartLegacy() {
     if (rollChart || !rollChartHost) return;
     if (!window.LightweightCharts) {
       window.setTimeout(initRollChart, 100);
@@ -1257,6 +1873,283 @@ function App() {
     queueChartResize();
   }
 
+  function rollChartSeriesConfig() {
+    const base = [
+      {},
+      { label: "Bid", scale: "price", stroke: "#21d19f", width: 1.6, points: { show: false } },
+      { label: "Ask", scale: "price", stroke: "#ffb15c", width: 1.6, points: { show: false } },
+      { label: "IV %", scale: "iv", stroke: "#a78bfa", width: 1, dash: [5, 4], points: { show: false } }
+    ];
+    for (const line of rollDrawnLines()) {
+      base.push({
+        label: line.name,
+        scale: line.target === "iv" ? "iv" : "price",
+        stroke: rollLineColor(line.target),
+        width: 1,
+        dash: [7, 5],
+        points: { show: false }
+      });
+    }
+    return base;
+  }
+
+  function clampRange(min, max, hardMin, hardMax, minSpan = 5) {
+    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return { min: hardMin, max: hardMax };
+    let nextMin = min;
+    let nextMax = max;
+    if (nextMax - nextMin < minSpan) {
+      const mid = (nextMin + nextMax) / 2;
+      nextMin = mid - minSpan / 2;
+      nextMax = mid + minSpan / 2;
+    }
+    if (Number.isFinite(hardMin) && nextMin < hardMin) {
+      nextMax += hardMin - nextMin;
+      nextMin = hardMin;
+    }
+    if (Number.isFinite(hardMax) && nextMax > hardMax) {
+      nextMin -= nextMax - hardMax;
+      nextMax = hardMax;
+    }
+    if (Number.isFinite(hardMin)) nextMin = Math.max(hardMin, nextMin);
+    if (Number.isFinite(hardMax)) nextMax = Math.min(hardMax, nextMax);
+    return { min: nextMin, max: nextMax };
+  }
+
+  function createRollInteractionPlugin() {
+    let over;
+    let destroy = () => {};
+    const zoomAxis = (u, key, pct, factor, hardMin, hardMax, minSpan) => {
+      const scale = u.scales[key];
+      if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
+      const span = scale.max - scale.min;
+      const anchor = scale.min + span * pct;
+      const nextSpan = span * factor;
+      const range = clampRange(anchor - nextSpan * pct, anchor + nextSpan * (1 - pct), hardMin, hardMax, minSpan);
+      u.setScale(key, range);
+    };
+    const panAxis = (u, key, pctDelta, hardMin, hardMax) => {
+      const scale = u.scales[key];
+      if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
+      const span = scale.max - scale.min;
+      const shift = span * pctDelta;
+      const range = clampRange(scale.min + shift, scale.max + shift, hardMin, hardMax, span);
+      u.setScale(key, range);
+    };
+
+    return {
+      hooks: {
+        ready: [
+          (u) => {
+            over = u.over;
+            let dragStart = null;
+            const wheel = (event) => {
+              if (!rollChartData[0]?.length) return;
+              event.preventDefault();
+              const rect = over.getBoundingClientRect();
+              const xPct = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+              const yPct = Math.min(1, Math.max(0, 1 - ((event.clientY - rect.top) / rect.height)));
+              const x = rollChartData[0];
+              const xMin = x[0];
+              const xMax = x[x.length - 1];
+
+              if (Math.abs(event.deltaX) > Math.abs(event.deltaY) && !event.ctrlKey && !event.metaKey) {
+                panAxis(u, "x", event.deltaX / rect.width, xMin, xMax);
+                return;
+              }
+
+              const factor = event.deltaY < 0 ? 0.82 : 1.22;
+              const zoomY = event.shiftKey || event.altKey || event.ctrlKey || event.metaKey;
+              const zoomX = !event.shiftKey || event.ctrlKey || event.metaKey;
+              if (zoomX) zoomAxis(u, "x", xPct, factor, xMin, xMax, 10);
+              if (zoomY) {
+                zoomAxis(u, "price", yPct, factor, -Infinity, Infinity, 0.01);
+                zoomAxis(u, "iv", yPct, factor, -Infinity, Infinity, 0.01);
+              }
+            };
+            const pointerDown = (event) => {
+              if (event.button !== 0 || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+              dragStart = {
+                x: event.clientX,
+                min: u.scales.x.min,
+                max: u.scales.x.max
+              };
+              over.setPointerCapture?.(event.pointerId);
+            };
+            const pointerMove = (event) => {
+              if (!dragStart || !rollChartData[0]?.length) return;
+              event.preventDefault();
+              const rect = over.getBoundingClientRect();
+              const span = dragStart.max - dragStart.min;
+              const dx = event.clientX - dragStart.x;
+              const x = rollChartData[0];
+              const shift = -(dx / rect.width) * span;
+              const range = clampRange(dragStart.min + shift, dragStart.max + shift, x[0], x[x.length - 1], span);
+              u.setScale("x", range);
+            };
+            const pointerUp = (event) => {
+              dragStart = null;
+              over.releasePointerCapture?.(event.pointerId);
+            };
+            const doubleClick = () => {
+              setRollChartWindow();
+              u.setScale("price", { min: null, max: null });
+              u.setScale("iv", { min: null, max: null });
+            };
+            over.addEventListener("wheel", wheel, { passive: false });
+            over.addEventListener("pointerdown", pointerDown);
+            over.addEventListener("pointermove", pointerMove);
+            over.addEventListener("pointerup", pointerUp);
+            over.addEventListener("pointercancel", pointerUp);
+            over.addEventListener("dblclick", doubleClick);
+            destroy = () => {
+              over.removeEventListener("wheel", wheel);
+              over.removeEventListener("pointerdown", pointerDown);
+              over.removeEventListener("pointermove", pointerMove);
+              over.removeEventListener("pointerup", pointerUp);
+              over.removeEventListener("pointercancel", pointerUp);
+              over.removeEventListener("dblclick", doubleClick);
+            };
+          }
+        ],
+        destroy: [() => destroy()]
+      }
+    };
+  }
+
+  function paddedRollRange(_u, dataMin, dataMax) {
+    if (!Number.isFinite(dataMin) || !Number.isFinite(dataMax)) return [dataMin, dataMax];
+    const span = Math.max(Math.abs(dataMax - dataMin), Math.abs(dataMax) * 0.002, 0.25);
+    const pad = span * 0.1;
+    return [dataMin - pad, dataMax + pad];
+  }
+
+  function initRollChart() {
+    if (rollChart || !rollChartHost) return;
+    const rect = rollChartHost.getBoundingClientRect();
+    rollReferenceCount = rollDrawnLines().length;
+    const series = rollChartSeriesConfig();
+    rollChartData = rollChartData.slice(0, series.length);
+    while (rollChartData.length < series.length) {
+      rollChartData.push((rollChartData[0] || []).map(() => null));
+    }
+    rollChart = new uPlot({
+      width: Math.max(1, Math.floor(rect.width)),
+      height: Math.max(280, Math.floor(rect.height)),
+      pxAlign: false,
+      legend: { show: false },
+      cursor: {
+        drag: { x: false, y: false },
+        points: { show: false },
+        focus: { prox: 24 }
+      },
+      scales: {
+        x: { time: true },
+        price: { auto: true, range: paddedRollRange },
+        iv: { auto: true, range: paddedRollRange }
+      },
+      axes: [
+        {
+          gap: 8,
+          stroke: "#7b8491",
+          grid: { show: true, stroke: "rgba(255,255,255,0.06)", width: 1 },
+          ticks: { show: true, stroke: "rgba(255,255,255,0.14)", width: 1 },
+          values: (_u, vals) => vals.map((v) => formatIstTime(v))
+        },
+        {
+          scale: "iv",
+          side: 3,
+          size: 60,
+          gap: 10,
+          stroke: "#a78bfa",
+          grid: { show: false },
+          values: (_u, vals) => vals.map((v) => `${Number(v).toFixed(1)}%`)
+        },
+        {
+          scale: "price",
+          side: 1,
+          size: 72,
+          gap: 10,
+          stroke: "#9ca3af",
+          grid: { show: true, stroke: "rgba(255,255,255,0.06)", width: 1 },
+          values: (_u, vals) => vals.map((v) => Number(v).toFixed(2))
+        }
+      ],
+      series,
+      plugins: [createRollInteractionPlugin()]
+    }, rollChartData, rollChartHost);
+    rollBidSeries = rollAskSeries = rollIvSeries = null;
+    queueChartResize();
+  }
+
+  function rebuildRollChart() {
+    if (rollChart) {
+      rollChart.destroy();
+      rollChart = null;
+    }
+    initRollChart();
+    setRollChartLines(rollChartLines.bid, rollChartLines.ask, rollChartLines.iv, false);
+  }
+
+  function setRollChartWindow(mode = rollWindowMode()) {
+    if (!rollChart || !rollChartData[0]?.length) return;
+    const x = rollChartData[0];
+    const minAll = x[0];
+    const maxAll = x[x.length - 1];
+    const spans = { "30m": 30 * 60, "1h": 60 * 60, "3h": 3 * 60 * 60 };
+    const visibleSpan = mode === "full" || !spans[mode] ? Math.max(1, maxAll - minAll) : spans[mode];
+    const pad = Math.max(30, visibleSpan * 0.018);
+    if (mode === "full" || !spans[mode]) {
+      rollChart.setScale("x", { min: minAll - pad, max: maxAll + pad });
+      return;
+    }
+    rollChart.setScale("x", { min: Math.max(minAll - pad, maxAll - spans[mode]), max: maxAll + pad });
+  }
+
+  function setRollChartWindowMode(mode) {
+    setRollWindowMode(mode);
+    setRollChartWindow(mode);
+  }
+
+  function setRollChartLines(bidLine, askLine, ivLine, applyWindow = true) {
+    rollChartLines = { bid: bidLine || [], ask: askLine || [], iv: ivLine || [] };
+    const times = new Set();
+    const bidByTime = new Map();
+    const askByTime = new Map();
+    const ivByTime = new Map();
+    for (const point of rollChartLines.bid) {
+      times.add(point.time);
+      bidByTime.set(point.time, point.value);
+    }
+    for (const point of rollChartLines.ask) {
+      times.add(point.time);
+      askByTime.set(point.time, point.value);
+    }
+    for (const point of rollChartLines.iv) {
+      times.add(point.time);
+      ivByTime.set(point.time, point.value);
+    }
+    const x = [...times].sort((a, b) => a - b);
+    const data = [
+      x,
+      x.map((time) => bidByTime.get(time) ?? null),
+      x.map((time) => askByTime.get(time) ?? null),
+      x.map((time) => ivByTime.get(time) ?? null)
+    ];
+    for (const line of rollDrawnLines()) {
+      data.push(x.map(() => line.value));
+    }
+    rollChartData = data;
+    if (rollChart && rollReferenceCount !== rollDrawnLines().length) {
+      rebuildRollChart();
+      return;
+    }
+    initRollChart();
+    if (!rollChart) return;
+    rollChart.setData(rollChartData);
+    resizeChart(rollChart, rollChartHost);
+    if (applyWindow) setRollChartWindow();
+  }
+
   async function loadRollingStraddle() {
     initRollChart();
     const start = fromLocalInput(rollStart());
@@ -1265,13 +2158,34 @@ function App() {
 
     setRollStatus("Spot");
     const sym = rollSymbol().trim().toUpperCase();
+    setRollStats((prev) => ({
+      ...prev,
+      spot: "--",
+      strike: "--",
+      bid: "--",
+      ask: "--",
+      iv: "--",
+      points: "0",
+      meta: `${sym} ${rollExpiry() || "Auto"} | loading | ${rollExchange()}`
+    }));
+    setRollExportData([]);
+    setRollChartLines([], [], []);
+    const spotSym = rollExchange() === "MCX" ? await resolveMcxMarketSymbol(sym, rollExpiry()) : sym;
+    const spotType = rollExchange() === "MCX" && spotSym.startsWith("FUT_") ? "FUT" : rollType();
+    setRollStats((prev) => ({
+      ...prev,
+      meta: `${sym} ${rollExpiry() || "Auto"} | spot ${spotSym} ${spotType} | ${rollExchange()}`
+    }));
+    if (rollExchange() === "MCX" && !spotSym.startsWith("FUT_")) {
+      throw new Error(`MCX future symbol not found for ${sym}. Refdata did not expose a FUT_* symbol for expiry ${rollExpiry() || "auto"}.`);
+    }
     const spotData = await nubraFetch("charts/timeseries", {
       method: "POST",
       body: JSON.stringify({
         query: [{
           exchange: rollExchange(),
-          type: rollType(),
-          values: [sym],
+          type: spotType,
+          values: [spotSym],
           fields: ["close"],
           startDate: start,
           endDate: end,
@@ -1281,12 +2195,12 @@ function App() {
         }]
       })
     });
-    const spotSymbolData = extractSymbolData(spotData, sym);
+    const spotSymbolData = extractSymbolData(spotData, spotSym);
     const spotPoints = (Array.isArray(spotSymbolData?.close) ? spotSymbolData.close : [])
       .map((p) => ({ ts: pointMs(p), spot: pointNumber(p, true) }))
       .filter((p) => Number.isFinite(p.ts) && p.spot > 0)
       .sort((a, b) => a.ts - b.ts);
-    if (!spotPoints.length) throw new Error("No 1-second spot data returned.");
+    if (!spotPoints.length) throw new Error(`No 1-second spot data returned for ${rollExchange()} ${spotType} ${spotSym}.`);
 
     setRollStatus("Refdata");
     let rows = await rollingOptionRows();
@@ -1310,22 +2224,35 @@ function App() {
     }
 
     const optionNames = [];
+    const aliasToCanonical = new Map();
     const liveRefIds = new Set();
+    const addOptionAliases = (row) => {
+      const aliases = row.aliases?.length ? row.aliases : [row.name];
+      for (const alias of aliases) {
+        const key = String(alias || "").toUpperCase();
+        if (!key) continue;
+        optionNames.push(key);
+        aliasToCanonical.set(key, row.name);
+      }
+    };
     for (const strike of requiredStrikes) {
       const ce = rowByKey.get(`${strike}|CE`);
       const pe = rowByKey.get(`${strike}|PE`);
       if (ce) {
-        optionNames.push(ce.name);
-        liveRefIds.add(ce.refId);
+        addOptionAliases(ce);
+        if (ce.refId) liveRefIds.add(ce.refId);
       }
       if (pe) {
-        optionNames.push(pe.name);
-        liveRefIds.add(pe.refId);
+        addOptionAliases(pe);
+        if (pe.refId) liveRefIds.add(pe.refId);
       }
     }
     if (!optionNames.length) throw new Error("No CE/PE symbols found around ATM +/-2.");
 
-    const seriesByName = await fetchRollingSeries([...new Set(optionNames)], start, end);
+    const seriesByName = await fetchRollingSeries([...new Set(optionNames)], start, end, aliasToCanonical);
+    if (!seriesByName.size) {
+      throw new Error(`No option chart series returned for ${rollExchange()} ${sym} ${rollExpiry()} using refdata symbols.`);
+    }
     const cursorByName = new Map();
     const bidLine = [];
     const askLine = [];
@@ -1347,8 +2274,12 @@ function App() {
         if (bid <= 0 || ask <= 0) continue;
         const mid = (bid + ask) / 2;
         // average IV mid across CE+PE (multiply by 100 for percentage display)
-        const ceIvMid = (ceQuote.ivBid != null && ceQuote.ivAsk != null) ? (ceQuote.ivBid + ceQuote.ivAsk) / 2 : null;
-        const peIvMid = (peQuote.ivBid != null && peQuote.ivAsk != null) ? (peQuote.ivBid + peQuote.ivAsk) / 2 : null;
+        const ceIvMid = ceQuote.ivMid != null
+          ? ceQuote.ivMid
+          : (ceQuote.ivBid != null && ceQuote.ivAsk != null) ? (ceQuote.ivBid + ceQuote.ivAsk) / 2 : null;
+        const peIvMid = peQuote.ivMid != null
+          ? peQuote.ivMid
+          : (peQuote.ivBid != null && peQuote.ivAsk != null) ? (peQuote.ivBid + peQuote.ivAsk) / 2 : null;
         let ivMid = null;
         if (ceIvMid != null && peIvMid != null) ivMid = ((ceIvMid + peIvMid) / 2) * 100;
         else if (ceIvMid != null) ivMid = ceIvMid * 100;
@@ -1363,13 +2294,7 @@ function App() {
     }
     if (!selected.length) throw new Error("No complete bid/ask straddle points found.");
 
-    rollBidSeries.setData(bidLine);
-    rollAskSeries.setData(askLine);
-    if (ivLine.length && rollIvSeries) {
-      rollIvSeries.setData(ivLine);
-    }
-    resizeChart(rollChart, rollChartHost);
-    rollChart.timeScale().fitContent();
+    setRollChartLines(bidLine, askLine, ivLine);
 
     const last = selected[selected.length - 1];
     const lastIv = ivLine.length ? ivLine[ivLine.length - 1].value : null;
@@ -1381,6 +2306,7 @@ function App() {
       orderbookByRef: new Map(),
       greeksByRef: new Map(),
       refIds: [...liveRefIds],
+      spotSymbol: spotSym,
       spot: last.spot,
       points: selected.length,
       lastValues: {
@@ -1391,7 +2317,8 @@ function App() {
       frames: {
         bid: null,
         ask: null,
-        iv: null
+        iv: null,
+        live: null
       }
     };
     setRollStats({
@@ -1572,11 +2499,7 @@ function App() {
       const askLine = selected.map(r => ({ time: r.tvSec, value: r.ask }));
       const ivLine  = selected.filter(r => r.ivMid > 0).map(r => ({ time: r.tvSec, value: r.ivMid }));
 
-      rollBidSeries.setData(bidLine);
-      rollAskSeries.setData(askLine);
-      if (ivLine.length && rollIvSeries) rollIvSeries.setData(ivLine);
-      resizeChart(rollChart, rollChartHost);
-      rollChart.timeScale().fitContent();
+      setRollChartLines(bidLine, askLine, ivLine);
 
       const last = selected[selected.length - 1];
       const lastIv = ivLine.length ? ivLine[ivLine.length - 1].value : null;
@@ -1624,6 +2547,20 @@ function App() {
   });
 
   createEffect(() => {
+    if (!authed()) {
+      setScriptCache({ date: "", exchange: scriptExchange(), rows: [], downloadedAt: "" });
+      setScriptStatus("Login to download scripts");
+      return;
+    }
+    const selectedExchange = scriptExchange();
+    localStorage.setItem("nubraScriptExchange", selectedExchange);
+    token();
+    deviceId();
+    environment();
+    untrack(() => loadCachedScripts(selectedExchange, false).catch((error) => setScriptStatus(error.message || "Script cache unavailable")));
+  });
+
+  createEffect(() => {
     if (!authed()) return;
     if (importMode()) return; // don't auto-fetch when showing imported data
     const loadKey = [
@@ -1632,6 +2569,7 @@ function App() {
       rollSymbol().trim().toUpperCase(),
       rollType(),
       rollExchange(),
+      rollExpiry(),
       rollStart(),
       rollEnd()
     ].join("|");
@@ -1659,7 +2597,7 @@ function App() {
     : "";
 
   return (
-    <div class={`min-h-screen ${widgetMode ? "desktop-widget-mode" : ""}`} style="background:var(--bg-main);color:var(--text-primary)">
+    <div class={`app-root ${widgetMode ? "desktop-widget-mode" : ""}`} style="background:var(--bg-main);color:var(--text-primary)">
       <Show when={widgetMode}>
         <div class="widget-titlebar">
           <div class="widget-drag-zone">
@@ -1819,11 +2757,98 @@ function App() {
         </div>
       </aside>
 
-      <main class="flex flex-col" style="background:var(--bg-main)">
+      <main class="app-main" style="background:var(--bg-main)">
         <Show when={toast()}>
           <div class="flex items-center gap-2.5 px-5 py-2 text-[11px] font-medium" style="background:rgba(239,68,68,0.07);border-bottom:1px solid rgba(239,68,68,0.18);color:#fca5a5">
             <span class="shrink-0 opacity-60">⚠</span>
             {toast()}
+          </div>
+        </Show>
+
+        <Show when={!widgetMode}>
+          <div class="unified-toolbar">
+            <button class="symbol-trigger" onClick={() => setSymbolSearchOpen(true)} disabled={!authed()}>
+              <span class="symbol-trigger-main">{scriptUnderlying() || rollSymbol() || chainSymbol() || symbol()}</span>
+              <span class="symbol-trigger-meta">{scriptExchange()} · {section() === "market" ? instrumentType() : rollType()} · {rollExpiry() || chainExpiry() || "Auto expiry"}</span>
+            </button>
+            <div class="script-exchange-tabs">
+              <For each={INSTRUMENT_EXCHANGES}>
+                {(name) => (
+                  <button class={scriptExchange() === name ? "active" : ""} onClick={() => setScriptExchange(name)} disabled={busy()}>
+                    {name}
+                  </button>
+                )}
+              </For>
+            </div>
+            <label class="unified-field">
+              Expiry
+              <select class="terminal-input" value={rollExpiry() || chainExpiry()} onInput={(e) => setUnifiedExpiry(e.currentTarget.value)}>
+                <option value="">Auto</option>
+                <For each={expiriesForUnderlying()}>{(expiry) => <option value={expiry}>{expiry}</option>}</For>
+              </select>
+            </label>
+            <label class="unified-field">
+              Start
+              <input class="terminal-input" type="datetime-local" value={section() === "market" ? startDate() : rollStart()} onInput={(e) => setUnifiedStart(e.currentTarget.value)} />
+            </label>
+            <label class="unified-field">
+              End
+              <input class="terminal-input" type="datetime-local" value={section() === "market" ? endDate() : rollEnd()} onInput={(e) => setUnifiedEnd(e.currentTarget.value)} />
+            </label>
+            <button class="toolbar-icon-button" title="Refresh symbols" onClick={() => run(() => loadCachedScripts(scriptExchange(), true))} disabled={busy() || !authed()}>
+              Refresh
+            </button>
+          </div>
+        </Show>
+
+        <Show when={symbolSearchOpen()}>
+          <div class="symbol-modal-backdrop" onClick={() => setSymbolSearchOpen(false)}>
+            <section class="symbol-modal" onClick={(event) => event.stopPropagation()}>
+              <div class="symbol-modal-header">
+                <h2>Symbol Search</h2>
+                <button class="symbol-close" onClick={() => setSymbolSearchOpen(false)}>×</button>
+              </div>
+              <div class="symbol-search-input-wrap">
+                <span class="symbol-search-icon">⌕</span>
+                <input
+                  class="symbol-search-input"
+                  value={symbolSearchText()}
+                  placeholder="Search NIFTY, BANKNIFTY, CRUDEOIL, RELIANCE..."
+                  onInput={(e) => setSymbolSearchText(e.currentTarget.value)}
+                  autofocus
+                />
+                <button class="symbol-clear" onClick={() => setSymbolSearchText("")}>×</button>
+              </div>
+              <div class="symbol-category-tabs">
+                <For each={SYMBOL_CATEGORIES}>
+                  {(category) => (
+                    <button class={symbolSearchCategory() === category.key ? "active" : ""} onClick={() => setSymbolSearchCategory(category.key)}>
+                      {category.label}
+                    </button>
+                  )}
+                </For>
+              </div>
+              <div class="symbol-result-list">
+                <For each={symbolSearchResults()} fallback={<div class="symbol-empty">No {symbolSearchCategory() === "all" ? "" : SYMBOL_CATEGORIES.find((item) => item.key === symbolSearchCategory())?.label.toLowerCase()} symbols for {scriptExchange()}</div>}>
+                  {(item) => (
+                    <button
+                      class="symbol-result-row"
+                      onClick={() => {
+                        const script = preferredScriptForSearchItem(item);
+                        setSymbolSearchOpen(false);
+                        if (script) run(() => applyScript(script));
+                      }}
+                    >
+                      <span class="symbol-badge">{item.badge}</span>
+                      <span class="symbol-result-code">{item.title}</span>
+                      <span class="symbol-result-name">{item.subtitle}</span>
+                      <span class="symbol-result-kind">{categoryLabel(item.category)}</span>
+                      <span class="symbol-result-exchange">{item.exchange}</span>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </section>
           </div>
         </Show>
 
@@ -1839,6 +2864,7 @@ function App() {
               <select class="terminal-input" value={rollType()} onInput={(e) => setRollType(e.currentTarget.value)}>
                 <option value="INDEX">INDEX</option>
                 <option value="STOCK">STOCK</option>
+                <option value="FUT">FUT</option>
               </select>
             </label>
             <label class="terminal-label">
@@ -1846,6 +2872,7 @@ function App() {
               <select class="terminal-input" value={rollExchange()} onInput={(e) => setRollExchange(e.currentTarget.value)}>
                 <option value="NSE">NSE</option>
                 <option value="BSE">BSE</option>
+                <option value="MCX">MCX</option>
               </select>
             </label>
             <label class="terminal-label">
@@ -1992,6 +3019,12 @@ function App() {
                   <p class="chart-card-meta">{rollStats().meta}</p>
                 </div>
                 <div class="flex items-center gap-4 text-[10px]">
+                  <div class="chart-window-tabs">
+                    <button class={rollWindowMode() === "full" ? "active" : ""} onClick={() => setRollChartWindowMode("full")}>Full</button>
+                    <button class={rollWindowMode() === "3h" ? "active" : ""} onClick={() => setRollChartWindowMode("3h")}>3H</button>
+                    <button class={rollWindowMode() === "1h" ? "active" : ""} onClick={() => setRollChartWindowMode("1h")}>1H</button>
+                    <button class={rollWindowMode() === "30m" ? "active" : ""} onClick={() => setRollChartWindowMode("30m")}>30M</button>
+                  </div>
                   <span class="flex items-center gap-1.5">
                     <span class="inline-block h-2 w-4 rounded-sm" style="background:#21d19f"></span>
                     <span style="color:var(--text-muted)">Bid ₹</span>
@@ -2077,6 +3110,7 @@ function App() {
                     }}>
                       <option value="NSE">NSE</option>
                       <option value="BSE">BSE</option>
+                      <option value="MCX">MCX</option>
                     </select>
                   </label>
                   <label class="chain-inline-field">
@@ -2220,6 +3254,7 @@ function App() {
               <select class="terminal-input" value={exchange()} onInput={(e) => setExchange(e.currentTarget.value)}>
                 <option value="NSE">NSE</option>
                 <option value="BSE">BSE</option>
+                <option value="MCX">MCX</option>
               </select>
             </label>
             <label class="terminal-label">

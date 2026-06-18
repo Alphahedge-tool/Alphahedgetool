@@ -71,6 +71,7 @@ class TokenClient:
 def main():
     config = read_config()
     symbol = str(config.get("symbol") or "").upper().strip()
+    spot_symbol = str(config.get("spotSymbol") or symbol).upper().strip()
     exchange = str(config.get("exchange") or "NSE").upper().strip()
     interval = str(config.get("interval") or "1m").strip()
     expiry = str(config.get("expiry") or "").strip()
@@ -115,7 +116,7 @@ def main():
         on_error=on_error,
     )
     socket.connect()
-    socket.subscribe([symbol], data_type="ohlcv", interval=interval, exchange=exchange)
+    socket.subscribe([spot_symbol], data_type="ohlcv", interval=interval, exchange=exchange)
     if expiry:
         socket.subscribe([f"{symbol}:{expiry}"], data_type="option", exchange=exchange)
     if ref_ids:
@@ -125,6 +126,7 @@ def main():
         "status",
         status="subscribed",
         symbol=symbol,
+        spot_symbol=spot_symbol,
         exchange=exchange,
         interval=interval,
         expiry=expiry,
