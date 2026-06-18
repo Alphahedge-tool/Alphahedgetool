@@ -4,11 +4,17 @@ Local WebGL chart for Nubra spot and historical OHLC data.
 
 ## Run
 
+On a fresh machine, install Node.js, clone this repo, then double-click:
+
+```text
+Start Desktop App.cmd
+```
+
+The launcher installs dependencies the first time it runs, then builds and opens the desktop app.
+
 ```powershell
 cmd /c npm start
 ```
-
-This builds and opens the desktop app.
 
 For the browser-only server, run:
 
