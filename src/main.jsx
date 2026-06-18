@@ -2117,6 +2117,42 @@ function App() {
             const keepManualScale = () => {
               scheduleApplyRollManualScales();
             };
+            const axisTooltip = document.createElement("div");
+            axisTooltip.className = "chart-axis-tooltip";
+            axisTooltip.hidden = true;
+            const chartWrap = u.root.querySelector(".u-wrap") || u.root;
+            chartWrap.appendChild(axisTooltip);
+            const axisTitle = (scaleKey) => {
+              if (scaleKey === "x") return "Time axis: drag to expand or squeeze time. Double-click to reset.";
+              if (scaleKey === "iv") return "IV axis: drag to expand or squeeze IV. Double-click to reset.";
+              return "Price axis: drag to expand or squeeze price. Double-click to reset.";
+            };
+            const axisTooltipText = (scaleKey, value) => {
+              if (!Number.isFinite(value)) return "";
+              if (scaleKey === "x") return `Time ${formatIstTime(value)} IST`;
+              if (scaleKey === "iv") return `IV ${value.toFixed(2)}%`;
+              return `Price ${rupee.format(value)}`;
+            };
+            const showAxisTooltip = (item, event) => {
+              const scale = u.scales[item.scale];
+              if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
+              const rect = item.el.getBoundingClientRect();
+              const pct = item.scale === "x"
+                ? Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width)))
+                : Math.min(1, Math.max(0, 1 - ((event.clientY - rect.top) / Math.max(1, rect.height))));
+              const value = scale.min + (scale.max - scale.min) * pct;
+              axisTooltip.textContent = axisTooltipText(item.scale, value);
+              const rootRect = u.root.getBoundingClientRect();
+              axisTooltip.hidden = false;
+              const tipRect = axisTooltip.getBoundingClientRect();
+              const left = Math.min(rootRect.width - tipRect.width - 8, Math.max(8, event.clientX - rootRect.left + 10));
+              const top = Math.min(rootRect.height - tipRect.height - 8, Math.max(8, event.clientY - rootRect.top - 30));
+              axisTooltip.style.left = `${left}px`;
+              axisTooltip.style.top = `${top}px`;
+            };
+            const hideAxisTooltip = () => {
+              axisTooltip.hidden = true;
+            };
             const doubleClick = () => {
               clearRollManualScales();
               setRollChartWindow();
@@ -2124,18 +2160,27 @@ function App() {
               u.setScale("iv", { min: null, max: null });
             };
             const axisHandlers = [
-              { el: axisEls[0], scale: "x" },
-              { el: axisEls[1], scale: "iv" },
-              { el: axisEls[2], scale: "price" }
+              { el: u.axes[0]?._el, scale: "x" },
+              { el: u.axes[1]?._el, scale: "iv" },
+              { el: u.axes[2]?._el, scale: "price" }
             ].filter((item) => item.el);
             for (const item of axisHandlers) {
+              item.el.classList.add(`roll-axis-${item.scale}`);
+              item.el.title = axisTitle(item.scale);
               item.wheel = axisWheel(item.scale);
               item.pointerDown = axisPointerDown(item.scale);
+              item.pointerMove = (event) => {
+                axisPointerMove(event);
+                showAxisTooltip(item, event);
+              };
+              item.pointerEnter = (event) => showAxisTooltip(item, event);
               item.el.addEventListener("wheel", item.wheel, { passive: false });
               item.el.addEventListener("pointerdown", item.pointerDown);
-              item.el.addEventListener("pointermove", axisPointerMove);
+              item.el.addEventListener("pointermove", item.pointerMove);
               item.el.addEventListener("pointerup", axisPointerUp);
               item.el.addEventListener("pointercancel", axisPointerUp);
+              item.el.addEventListener("pointerenter", item.pointerEnter);
+              item.el.addEventListener("pointerleave", hideAxisTooltip);
               item.el.addEventListener("click", keepManualScale);
               item.el.addEventListener("dblclick", doubleClick);
             }
@@ -2149,12 +2194,15 @@ function App() {
               for (const item of axisHandlers) {
                 item.el.removeEventListener("wheel", item.wheel);
                 item.el.removeEventListener("pointerdown", item.pointerDown);
-                item.el.removeEventListener("pointermove", axisPointerMove);
+                item.el.removeEventListener("pointermove", item.pointerMove);
                 item.el.removeEventListener("pointerup", axisPointerUp);
                 item.el.removeEventListener("pointercancel", axisPointerUp);
+                item.el.removeEventListener("pointerenter", item.pointerEnter);
+                item.el.removeEventListener("pointerleave", hideAxisTooltip);
                 item.el.removeEventListener("click", keepManualScale);
                 item.el.removeEventListener("dblclick", doubleClick);
               }
+              axisTooltip.remove();
               over.removeEventListener("wheel", wheel);
               over.removeEventListener("pointerdown", pointerDown);
               over.removeEventListener("pointermove", pointerMove);
@@ -2216,27 +2264,33 @@ function App() {
       },
       axes: [
         {
+          class: "roll-axis-x",
           gap: 8,
           stroke: "#7b8491",
+          border: { show: true, stroke: "rgba(255,255,255,0.24)", width: 1 },
           grid: { show: true, stroke: "rgba(255,255,255,0.06)", width: 1 },
           ticks: { show: true, stroke: "rgba(255,255,255,0.14)", width: 1 },
           values: (_u, vals) => vals.map((v) => formatIstTime(v))
         },
         {
+          class: "roll-axis-iv",
           scale: "iv",
           side: 3,
           size: 60,
           gap: 10,
           stroke: "#a78bfa",
+          border: { show: true, stroke: "rgba(255,255,255,0.24)", width: 1 },
           grid: { show: false },
           values: (_u, vals) => vals.map((v) => `${Number(v).toFixed(1)}%`)
         },
         {
+          class: "roll-axis-price",
           scale: "price",
           side: 1,
           size: 72,
           gap: 10,
           stroke: "#9ca3af",
+          border: { show: true, stroke: "rgba(255,255,255,0.24)", width: 1 },
           grid: { show: true, stroke: "rgba(255,255,255,0.06)", width: 1 },
           values: (_u, vals) => vals.map((v) => Number(v).toFixed(2))
         }
