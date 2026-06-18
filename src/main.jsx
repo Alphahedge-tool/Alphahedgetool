@@ -330,6 +330,7 @@ function App() {
   let rollChartLines = { bid: [], ask: [], iv: [] };
   let rollChartData = [[], [], [], []];
   let rollReferenceCount = 0;
+  let rollManualScales = { x: null, price: null, iv: null };
   const rollPriceLines = new Map();
   let autoRollLoadedKey = "";
   let autoChainLoadedKey = "";
@@ -1556,6 +1557,7 @@ function App() {
     rollChartData = data;
     rollChart.setData(rollChartData);
     setRollChartWindow();
+    applyRollManualScales();
   }
 
   function animateRollChartSnapshot(time, target, commit) {
@@ -1915,6 +1917,29 @@ function App() {
     return { min: nextMin, max: nextMax };
   }
 
+  function rememberRollScale(key, range) {
+    if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max) || range.max <= range.min) return;
+    rollManualScales = { ...rollManualScales, [key]: { min: range.min, max: range.max } };
+  }
+
+  function setRollScale(key, range, manual = false) {
+    if (!rollChart || !range) return;
+    rollChart.setScale(key, range);
+    if (manual) rememberRollScale(key, range);
+  }
+
+  function applyRollManualScales() {
+    if (!rollChart) return;
+    for (const key of ["x", "price", "iv"]) {
+      const range = rollManualScales[key];
+      if (range) rollChart.setScale(key, range);
+    }
+  }
+
+  function clearRollManualScales(keys = ["x", "price", "iv"]) {
+    rollManualScales = keys.reduce((next, key) => ({ ...next, [key]: null }), rollManualScales);
+  }
+
   function createRollInteractionPlugin() {
     let over;
     let destroy = () => {};
@@ -1930,6 +1955,7 @@ function App() {
       const nextSpan = span * factor;
       const range = clampRange(anchor - nextSpan * pct, anchor + nextSpan * (1 - pct), hardMin, hardMax, minSpan);
       u.setScale(key, range);
+      rememberRollScale(key, range);
     };
     const panAxis = (u, key, pctDelta, hardMin, hardMax) => {
       const scale = u.scales[key];
@@ -1938,6 +1964,7 @@ function App() {
       const shift = span * pctDelta;
       const range = clampRange(scale.min + shift, scale.max + shift, hardMin, hardMax, span);
       u.setScale(key, range);
+      rememberRollScale(key, range);
     };
 
     return {
@@ -2006,6 +2033,7 @@ function App() {
               const shift = -(dx / rect.width) * span;
               const range = clampRange(dragStart.min + shift, dragStart.max + shift, x[0], x[x.length - 1], span);
               u.setScale("x", range);
+              rememberRollScale("x", range);
             };
             const pointerUp = (event) => {
               dragStart = null;
@@ -2037,6 +2065,7 @@ function App() {
                 const nextSpan = Math.max(10, span * factor);
                 const range = clampRange(mid - nextSpan / 2, mid + nextSpan / 2, min, max, 10);
                 u.setScale("x", range);
+                rememberRollScale("x", range);
                 return;
               }
               const dy = event.clientY - axisDragStart.y;
@@ -2045,12 +2074,14 @@ function App() {
               const nextSpan = Math.max(0.01, span * factor);
               const range = clampRange(mid - nextSpan / 2, mid + nextSpan / 2, -Infinity, Infinity, 0.01);
               u.setScale(axisDragStart.scaleKey, range);
+              rememberRollScale(axisDragStart.scaleKey, range);
             };
             const axisPointerUp = (event) => {
               axisDragStart = null;
               event.currentTarget.releasePointerCapture?.(event.pointerId);
             };
             const doubleClick = () => {
+              clearRollManualScales();
               setRollChartWindow();
               u.setScale("price", { min: null, max: null });
               u.setScale("iv", { min: null, max: null });
@@ -2175,6 +2206,10 @@ function App() {
 
   function setRollChartWindow(mode = rollWindowMode()) {
     if (!rollChart || !rollChartData[0]?.length) return;
+    if (rollManualScales.x) {
+      rollChart.setScale("x", rollManualScales.x);
+      return;
+    }
     const x = rollChartData[0];
     const minAll = x[0];
     const maxAll = x[x.length - 1];
@@ -2182,13 +2217,14 @@ function App() {
     const visibleSpan = mode === "full" || !spans[mode] ? Math.max(1, maxAll - minAll) : spans[mode];
     const pad = Math.max(30, visibleSpan * 0.018);
     if (mode === "full" || !spans[mode]) {
-      rollChart.setScale("x", { min: minAll - pad, max: maxAll + pad });
+      setRollScale("x", { min: minAll - pad, max: maxAll + pad });
       return;
     }
-    rollChart.setScale("x", { min: Math.max(minAll - pad, maxAll - spans[mode]), max: maxAll + pad });
+    setRollScale("x", { min: Math.max(minAll - pad, maxAll - spans[mode]), max: maxAll + pad });
   }
 
   function setRollChartWindowMode(mode) {
+    clearRollManualScales(["x"]);
     setRollWindowMode(mode);
     setRollChartWindow(mode);
   }
@@ -2231,6 +2267,7 @@ function App() {
     rollChart.setData(rollChartData);
     resizeChart(rollChart, rollChartHost);
     if (applyWindow) setRollChartWindow();
+    applyRollManualScales();
   }
 
   async function loadRollingStraddle() {
@@ -2239,6 +2276,7 @@ function App() {
     const end = fromLocalInput(rollEnd());
     if (!start || !end) throw new Error("Rolling start and end are required.");
 
+    clearRollManualScales();
     setRollStatus("Spot");
     const sym = rollSymbol().trim().toUpperCase();
     setRollStats((prev) => ({
