@@ -1958,7 +1958,10 @@ function App() {
     let destroy = () => {};
     const chartXBounds = () => {
       const x = rollChartData[0] || [];
-      return { min: x[0], max: x[x.length - 1] };
+      const dataMin = x[0];
+      const dataMax = x[x.length - 1];
+      const pad = Math.max(30, (dataMax - dataMin) * 0.02);
+      return { min: dataMin - pad, max: dataMax + pad };
     };
     const zoomAxis = (u, key, pct, factor, hardMin, hardMax, minSpan) => {
       const scale = u.scales[key];
@@ -1994,9 +1997,7 @@ function App() {
               const rect = over.getBoundingClientRect();
               const xPct = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
               const yPct = Math.min(1, Math.max(0, 1 - ((event.clientY - rect.top) / rect.height)));
-              const x = rollChartData[0];
-              const xMin = x[0];
-              const xMax = x[x.length - 1];
+              const { min: xMin, max: xMax } = chartXBounds();
 
               if (Math.abs(event.deltaX) > Math.abs(event.deltaY) && !event.ctrlKey && !event.metaKey) {
                 panAxis(u, "x", event.deltaX / rect.width, xMin, xMax);
@@ -2048,10 +2049,10 @@ function App() {
               const rect = over.getBoundingClientRect();
               const dx = event.clientX - dragStart.x;
               const dy = event.clientY - dragStart.y;
-              const x = rollChartData[0];
+              const { min: xHardMin, max: xHardMax } = chartXBounds();
               const xSpan = dragStart.xMax - dragStart.xMin;
               const xShift = -(dx / Math.max(1, rect.width)) * xSpan;
-              const xRange = clampRange(dragStart.xMin + xShift, dragStart.xMax + xShift, x[0], x[x.length - 1], xSpan);
+              const xRange = clampRange(dragStart.xMin + xShift, dragStart.xMax + xShift, xHardMin, xHardMax, xSpan);
               rememberRollScale("x", xRange);
               u.setScale("x", xRange);
 
@@ -2234,8 +2235,123 @@ function App() {
   function paddedRollRange(_u, dataMin, dataMax) {
     if (!Number.isFinite(dataMin) || !Number.isFinite(dataMax)) return [dataMin, dataMax];
     const span = Math.max(Math.abs(dataMax - dataMin), Math.abs(dataMax) * 0.002, 0.25);
-    const pad = span * 0.1;
+    const pad = span * 0.18;
     return [dataMin - pad, dataMax + pad];
+  }
+
+  function createRollLastValuePlugin() {
+    const labels = [];
+    function makeLabel(className) {
+      const el = document.createElement("div");
+      el.className = `roll-last-label ${className}`;
+      el.hidden = true;
+      return el;
+    }
+    return {
+      hooks: {
+        init: [(u) => {
+          const wrap = u.root.querySelector(".u-wrap") || u.root;
+          const defs = [
+            { cls: "roll-last-bid", color: "#21d19f", series: 1, scale: "price", side: "right" },
+            { cls: "roll-last-ask", color: "#ffb15c", series: 2, scale: "price", side: "right" },
+            { cls: "roll-last-iv", color: "#a78bfa", series: 3, scale: "iv", side: "left" },
+            { cls: "roll-last-time", color: "#7b8491", series: 0, scale: "x", side: "bottom" },
+          ];
+          for (const def of defs) {
+            const el = makeLabel(def.cls);
+            el.style.borderColor = def.color;
+            el.style.color = def.color;
+            wrap.appendChild(el);
+            labels.push({ el, ...def });
+          }
+        }],
+        setData: [(u) => { updateLastLabels(u); }],
+        setScale: [(u) => { updateLastLabels(u); }],
+        setSize: [(u) => { updateLastLabels(u); }],
+      }
+    };
+    function updateLastLabels(u) {
+      for (const label of labels) {
+        const data = rollChartData[label.series];
+        if (!data?.length) { label.el.hidden = true; continue; }
+        let lastVal = null;
+        for (let i = data.length - 1; i >= 0; i--) {
+          if (Number.isFinite(data[i])) { lastVal = data[i]; break; }
+        }
+        if (lastVal == null) { label.el.hidden = true; continue; }
+        if (label.side === "bottom") {
+          const scale = u.scales.x;
+          if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) { label.el.hidden = true; continue; }
+          const px = u.valToPos(lastVal, "x", true);
+          if (px < 0 || px > u.over.clientWidth) { label.el.hidden = true; continue; }
+          label.el.textContent = formatIstTime(lastVal);
+          label.el.hidden = false;
+          label.el.style.left = `${px}px`;
+          label.el.style.bottom = "0px";
+          label.el.style.top = "";
+          label.el.style.right = "";
+          label.el.style.transform = "translateX(-50%)";
+        } else {
+          const scale = u.scales[label.scale];
+          if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) { label.el.hidden = true; continue; }
+          const px = u.valToPos(lastVal, label.scale, true);
+          if (px < 0 || px > u.over.clientHeight) { label.el.hidden = true; continue; }
+          if (label.scale === "price") {
+            label.el.textContent = Number(lastVal).toFixed(2);
+          } else {
+            label.el.textContent = `${Number(lastVal).toFixed(1)}%`;
+          }
+          label.el.hidden = false;
+          label.el.style.top = `${px}px`;
+          label.el.style.transform = "translateY(-50%)";
+          if (label.side === "right") {
+            label.el.style.right = "0px";
+            label.el.style.left = "";
+          } else {
+            label.el.style.left = "0px";
+            label.el.style.right = "";
+          }
+          label.el.style.bottom = "";
+        }
+      }
+    }
+  }
+
+  function createRollTooltipPlugin() {
+    let tooltip;
+    return {
+      hooks: {
+        init: [(u) => {
+          tooltip = document.createElement("div");
+          tooltip.className = "roll-chart-tooltip";
+          tooltip.hidden = true;
+          u.over.appendChild(tooltip);
+        }],
+        setCursor: [(u) => {
+          if (!tooltip) return;
+          const idx = u.cursor.idx;
+          if (idx == null || idx < 0 || !rollChartData[0]?.length) {
+            tooltip.hidden = true;
+            return;
+          }
+          const time = rollChartData[0][idx];
+          const bid = rollChartData[1]?.[idx];
+          const ask = rollChartData[2]?.[idx];
+          const iv = rollChartData[3]?.[idx];
+          if (!Number.isFinite(time)) { tooltip.hidden = true; return; }
+          const parts = [`<span class="roll-tip-time">${formatIstTime(time)}</span>`];
+          if (Number.isFinite(bid)) parts.push(`<span style="color:#21d19f">Bid: ${rupee.format(bid)}</span>`);
+          if (Number.isFinite(ask)) parts.push(`<span style="color:#ffb15c">Ask: ${rupee.format(ask)}</span>`);
+          if (Number.isFinite(iv)) parts.push(`<span style="color:#a78bfa">IV: ${iv.toFixed(2)}%</span>`);
+          tooltip.innerHTML = parts.join("");
+          tooltip.hidden = false;
+          const left = Math.min(u.over.clientWidth - tooltip.offsetWidth - 12, Math.max(8, u.cursor.left + 14));
+          const top = Math.max(8, Math.min(u.over.clientHeight - tooltip.offsetHeight - 12, u.cursor.top - 42));
+          tooltip.style.left = `${left}px`;
+          tooltip.style.top = `${top}px`;
+        }]
+      }
+    };
   }
 
   function initRollChart() {
@@ -2247,10 +2363,11 @@ function App() {
     while (rollChartData.length < series.length) {
       rollChartData.push((rollChartData[0] || []).map(() => null));
     }
+    const axisFont = "12px monospace";
     rollChart = new uPlot({
       width: Math.max(1, Math.floor(rect.width)),
       height: Math.max(280, Math.floor(rect.height)),
-      pxAlign: false,
+      pxAlign: true,
       legend: { show: false },
       cursor: {
         drag: { x: false, y: false },
@@ -2264,39 +2381,51 @@ function App() {
       },
       axes: [
         {
+          show: true,
           class: "roll-axis-x",
-          gap: 8,
-          stroke: "#7b8491",
+          size: 44,
+          gap: 6,
+          font: axisFont,
+          stroke: "#c9cdd3",
           border: { show: true, stroke: "rgba(255,255,255,0.24)", width: 1 },
           grid: { show: true, stroke: "rgba(255,255,255,0.06)", width: 1 },
-          ticks: { show: true, stroke: "rgba(255,255,255,0.14)", width: 1 },
-          values: (_u, vals) => vals.map((v) => formatIstTime(v))
+          ticks: { show: true, stroke: "rgba(255,255,255,0.18)", width: 1, size: 5 },
+          values: (_u, vals) => vals.map((v) => formatIstTime(v)),
+          space: 80
         },
         {
+          show: true,
           class: "roll-axis-iv",
           scale: "iv",
           side: 3,
-          size: 60,
-          gap: 10,
-          stroke: "#a78bfa",
+          size: 64,
+          gap: 8,
+          font: axisFont,
+          stroke: "#c4b5fd",
           border: { show: true, stroke: "rgba(255,255,255,0.24)", width: 1 },
           grid: { show: false },
-          values: (_u, vals) => vals.map((v) => `${Number(v).toFixed(1)}%`)
+          ticks: { show: true, stroke: "rgba(167,139,250,0.3)", width: 1, size: 5 },
+          values: (_u, vals) => vals.map((v) => `${Number(v).toFixed(1)}%`),
+          space: 40
         },
         {
+          show: true,
           class: "roll-axis-price",
           scale: "price",
           side: 1,
-          size: 72,
-          gap: 10,
-          stroke: "#9ca3af",
+          size: 80,
+          gap: 8,
+          font: axisFont,
+          stroke: "#c9cdd3",
           border: { show: true, stroke: "rgba(255,255,255,0.24)", width: 1 },
           grid: { show: true, stroke: "rgba(255,255,255,0.06)", width: 1 },
-          values: (_u, vals) => vals.map((v) => Number(v).toFixed(2))
+          ticks: { show: true, stroke: "rgba(255,255,255,0.18)", width: 1, size: 5 },
+          values: (_u, vals) => vals.map((v) => Number(v).toFixed(2)),
+          space: 40
         }
       ],
       series,
-      plugins: [createRollInteractionPlugin()]
+      plugins: [createRollInteractionPlugin(), createRollTooltipPlugin(), createRollLastValuePlugin()]
     }, rollChartData, rollChartHost);
     rollBidSeries = rollAskSeries = rollIvSeries = null;
     queueChartResize();
