@@ -81,24 +81,24 @@ function pickOptionValue(option, keys) {
 }
 
 const CHAIN_COLUMNS = [
+  { key: "delta", label: "Delta" },
+  { key: "oi", label: "OI" },
+  { key: "oi_change", label: "OI Change %" },
+  { key: "volume", label: "Volume" },
   { key: "ltp", label: "LTP" },
   { key: "iv", label: "IV (%)" },
-  { key: "delta", label: "Delta" },
   { key: "gamma", label: "Gamma" },
   { key: "theta", label: "Theta" },
-  { key: "vega", label: "Vega" },
-  { key: "volume", label: "Volume" },
-  { key: "oi", label: "OI" }
+  { key: "vega", label: "Vega" }
 ];
 
-const CALL_COLUMN_ORDER = ["volume", "oi", "vega", "theta", "gamma", "delta", "iv", "ltp"];
-const PUT_COLUMN_ORDER = ["ltp", "iv", "delta", "gamma", "theta", "vega", "volume", "oi"];
+const CALL_COLUMN_ORDER = ["delta", "oi", "oi_change", "volume", "vega", "theta", "gamma", "iv", "ltp"];
+const PUT_COLUMN_ORDER = ["ltp", "iv", "gamma", "theta", "vega", "volume", "oi_change", "oi", "delta"];
 const DEFAULT_CHAIN_COLUMNS = Object.fromEntries(CHAIN_COLUMNS.map((column) => [column.key, true]));
 const MARKET_STRIP_SYMBOLS = [
   { label: "NIFTY", instrument: "NIFTY", exchange: "NSE" },
   { label: "BANKNIFTY", instrument: "BANKNIFTY", exchange: "NSE" },
-  { label: "SENSEX", instrument: "SENSEX", exchange: "BSE" },
-  { label: "INDIA VIX", instrument: "INDIA VIX", instruments: ["INDIA VIX", "INDIAVIX", "INDIA_VIX"], exchange: "NSE" }
+  { label: "SENSEX", instrument: "SENSEX", exchange: "BSE" }
 ];
 const INSTRUMENT_EXCHANGES = ["NSE", "BSE", "MCX"];
 const SYMBOL_CATEGORIES = [
@@ -111,6 +111,9 @@ const SYMBOL_CATEGORIES = [
 ];
 const INSTRUMENT_DB = "nubra-instrument-cache-v1";
 const INSTRUMENT_STORE = "masters";
+const ROLLING_INTERVALS = ["1s", "1m"];
+const ROLLING_BATCH_SIZE = 8;
+const ROLLING_FETCH_CONCURRENCY = 4;
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
@@ -160,6 +163,10 @@ function todayAt(hour, minute) {
   const date = new Date();
   date.setHours(hour, minute, 0, 0);
   return date;
+}
+
+function dateKey(date) {
+  return toLocalInput(date).slice(0, 10);
 }
 
 function fromLocalInput(value) {
@@ -253,6 +260,13 @@ function App() {
   const [busy, setBusy] = createSignal(false);
   const [toast, setToast] = createSignal("");
   const [drawerOpen, setDrawerOpen] = createSignal(false);
+  const [mainHelpOpen, setMainHelpOpen] = createSignal(false);
+  const [rollSeriesVisibility, setRollSeriesVisibility] = createSignal({
+    bid: localStorage.getItem("nubraRollSeriesBid") !== "0",
+    ask: localStorage.getItem("nubraRollSeriesAsk") !== "0",
+    iv: localStorage.getItem("nubraRollSeriesIv") !== "0"
+  });
+  const [widgetMaximized, setWidgetMaximized] = createSignal(false);
   const [marketStrip, setMarketStrip] = createSignal(MARKET_STRIP_SYMBOLS.map((item) => ({
     ...item,
     price: null,
@@ -263,6 +277,7 @@ function App() {
   const [scriptExchange, setScriptExchange] = createSignal(localStorage.getItem("nubraScriptExchange") || "NSE");
   const [scriptUnderlying, setScriptUnderlying] = createSignal(localStorage.getItem("nubraScriptUnderlying") || "");
   const [scriptCache, setScriptCache] = createSignal({ date: "", exchange: "", rows: [], downloadedAt: "" });
+  const [indexMasterRows, setIndexMasterRows] = createSignal([]);
   const [scriptStatus, setScriptStatus] = createSignal("Login to download scripts");
   const [symbolSearchOpen, setSymbolSearchOpen] = createSignal(false);
   const [symbolSearchText, setSymbolSearchText] = createSignal("");
@@ -311,16 +326,25 @@ function App() {
   const [chainExpiries, setChainExpiries] = createSignal([]);
   const [chainStatus, setChainStatus] = createSignal("Idle");
   const [chainData, setChainData] = createSignal(null);
+  const [chainIvChange, setChainIvChange] = createSignal({ key: "", value: null, baseIv: null });
   const [chainFilterMode, setChainFilterMode] = createSignal("atm");
-  const [chainAtmRange, setChainAtmRange] = createSignal("");
+  const [chainAtmRange, setChainAtmRange] = createSignal("10");
   const [chainPremiumMin, setChainPremiumMin] = createSignal("");
   const [chainPremiumMax, setChainPremiumMax] = createSignal("");
   const [chainColumnMenuOpen, setChainColumnMenuOpen] = createSignal(false);
+  const [chainExpiryMenuOpen, setChainExpiryMenuOpen] = createSignal(false);
   const [chainVisibleColumns, setChainVisibleColumns] = createSignal({ ...DEFAULT_CHAIN_COLUMNS });
   const [chainLive, setChainLive] = createSignal(false);
+  const [chainSearchText, setChainSearchText] = createSignal("");
+  const [chainSearchOpen, setChainSearchOpen] = createSignal(false);
+  const [chainSearchCategory, setChainSearchCategory] = createSignal("all");
+  const [chainSearchRows, setChainSearchRows] = createSignal([]);
+  const [instrumentSwitching, setInstrumentSwitching] = createSignal(false);
 
   let priceChartHost;
   let rollChartHost;
+  let chainSearchHost;
+  let chainExpiryMenuHost;
   let priceChart;
   let candleSeries;
   let rollChart;
@@ -334,10 +358,13 @@ function App() {
   const rollPriceLines = new Map();
   let autoRollLoadedKey = "";
   let autoChainLoadedKey = "";
+  let autoChainSearchKey = "";
   let rollLiveSocket = null;
   let rollLiveContext = null;
   let rollLiveFlushTimer = null;
   let chainLiveSocket = null;
+  let marketStripSocket = null;
+  let marketStripReconnectTimer = null;
 
   const [rollLive, setRollLive] = createSignal(false);
 
@@ -370,11 +397,216 @@ function App() {
     if (!filter) return optionRows();
     return optionRows().filter((row) => Number(row.strike) >= filter.min && Number(row.strike) <= filter.max);
   });
-  const visibleColumnCount = createMemo(() => visibleCallColumns().length);
 
+  const chainRefMetrics = createMemo(() => {
+    const asset = String(chainData()?.asset || chainSymbol()).trim().toUpperCase();
+    const expiry = String(chainData()?.expiry || chainExpiry() || "").trim();
+    const candidates = (scriptCache().rows || [])
+      .filter((row) => {
+        const rowAsset = String(row.asset || row.symbol || "").trim().toUpperCase();
+        if (row.exchange !== chainExchange() || rowAsset !== asset) return false;
+        if (expiry && String(row.expiry || "") !== expiry) return false;
+        return scriptKind(row) === "OPT" || scriptKind(row) === "FUT";
+      })
+      .sort((a, b) => {
+        const rank = (row) => scriptKind(row) === "OPT" ? 0 : 1;
+        return rank(a) - rank(b) || expirySortValue(a.expiry) - expirySortValue(b.expiry);
+      });
+    const refLot = candidates.map((row) => rawNumber(row.lotSize)).find((value) => value != null && value > 0);
+    const optionLot = [
+      ...(Array.isArray(chainData()?.ce) ? chainData().ce : []),
+      ...(Array.isArray(chainData()?.pe) ? chainData().pe : [])
+    ]
+      .map((option) => rawNumber(option?.lot_size ?? option?.lotSize ?? option?.market_lot ?? option?.marketLot))
+      .find((value) => value != null && value > 0);
+    return {
+      marketLot: rawNumber(
+        chainData()?.market_lot ??
+        chainData()?.marketLot ??
+        chainData()?.lot_size ??
+        chainData()?.lotSize
+      ) ?? optionLot ?? refLot ?? null,
+      daysForExpiry: rawNumber(chainData()?.days_to_expiry ?? chainData()?.daysForExpiry) ?? daysUntilExpiry(expiry)
+    };
+  });
+
+  function chainOptionIv(option) {
+    return normalizeLiveIv(pickOptionValue(option, ["iv", "IV", "iv_mid", "ivMid", "iv_percent", "ivPercent", "implied_volatility", "impliedVolatility", "volatility"]));
+  }
+
+  function optionOiChangeValue(option) {
+    if (!option) return null;
+    const oi = rawNumber(option.oi ?? option.open_interest);
+    const previousOi = rawNumber(option.previous_oi ?? option.previous_open_interest);
+    const rawChange = rawNumber(
+      option.oi_change ??
+      option.oiChange ??
+      option.change_oi ??
+      option.open_interest_change ??
+      option.change_in_oi
+    );
+    return rawChange ?? (oi != null && previousOi != null ? oi - previousOi : null);
+  }
+
+  const chainDerivedStats = createMemo(() => {
+    const rows = optionRows();
+    let callOi = 0;
+    let putOi = 0;
+    for (const row of rows) {
+      callOi += rawNumber(row.ce?.oi ?? row.ce?.open_interest) || 0;
+      putOi += rawNumber(row.pe?.oi ?? row.pe?.open_interest) || 0;
+    }
+
+    const atmRaw = rawNumber(chainData()?.atm);
+    const strikes = rows.map((row) => Number(row.strike)).filter(Number.isFinite);
+    const atmStrike = Number.isFinite(atmRaw)
+      ? atmRaw
+      : strikes.length && Number.isFinite(toRupees(chainData()?.cp))
+        ? nearestStrike((toRupees(chainData()?.cp) || 0) * 100, strikes, inferStrikeStep(strikes))
+        : null;
+    const atmRow = Number.isFinite(atmStrike)
+      ? rows.reduce((best, row) =>
+          !best || Math.abs(Number(row.strike) - atmStrike) < Math.abs(Number(best.strike) - atmStrike) ? row : best,
+          null)
+      : null;
+    const ivValues = [chainOptionIv(atmRow?.ce), chainOptionIv(atmRow?.pe)].filter((value) => Number.isFinite(value));
+    const atmIv = ivValues.length ? ivValues.reduce((sum, value) => sum + value, 0) / ivValues.length : null;
+    return {
+      atmIv,
+      pcr: callOi > 0 ? putOi / callOi : null
+    };
+  });
+
+  const chainIvChangePercent = createMemo(() => {
+    const currentIv = chainDerivedStats().atmIv;
+    const baseIv = chainIvChange().baseIv;
+    return Number.isFinite(currentIv) && Number.isFinite(baseIv) && baseIv > 0
+      ? ((currentIv - baseIv) / baseIv) * 100
+      : null;
+  });
+
+  const maxOiChangeAbs = createMemo(() => {
+    let max = 0;
+    for (const row of visibleOptionRows()) {
+      for (const option of [row.ce, row.pe]) {
+        const change = optionOiChangeValue(option);
+        if (Number.isFinite(change)) max = Math.max(max, Math.abs(change));
+      }
+    }
+    return max || 1;
+  });
+  const maxOiAbs = createMemo(() => {
+    let max = 0;
+    for (const row of visibleOptionRows()) {
+      for (const option of [row.ce, row.pe]) {
+        const oi = rawNumber(option?.oi ?? option?.open_interest);
+        if (Number.isFinite(oi)) max = Math.max(max, Math.abs(oi));
+      }
+    }
+    return max || 1;
+  });
+  function chainScriptMatches() {
+    const query = chainSearchText().trim().toUpperCase();
+    const indexAssets = new Set(["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "INDIA VIX", "INDIAVIX"]);
+    const isIndexRow = (row) =>
+      String(row.assetType || "").toUpperCase().includes("INDEX") ||
+      scriptKind(row) === "INDEX" ||
+      indexAssets.has(String(row.asset || row.symbol || "").trim().toUpperCase());
+    const grouped = new Map();
+    const addRow = (row) => {
+      const asset = row.asset || row.symbol;
+      if (!asset) return;
+      const kind = scriptKind(row);
+      const category = row.exchange === "MCX"
+        ? "commodity"
+        : isIndexRow(row)
+          ? "index"
+          : kind === "FUT"
+            ? "future"
+            : kind === "OPT"
+              ? "option"
+              : "stock";
+      const key = `${category}|${row.exchange}|${asset}`;
+      const current = grouped.get(key) || {
+        asset,
+        exchange: row.exchange,
+        category,
+        displayName: category === "index" ? `${asset} Index` : row.displayName || asset,
+        types: new Set(),
+        expiries: new Set(),
+        searchText: ""
+      };
+      if (category === "index") current.types.add("INDEX");
+      else current.types.add(kind);
+      if (row.expiry && category !== "index") current.expiries.add(row.expiry);
+      current.searchText += ` ${row.searchText || ""} ${row.displayName || ""}`;
+      grouped.set(key, current);
+    };
+    for (const row of scriptCache().rows || []) addRow(row);
+    for (const row of chainSearchRows()) addRow(row);
+    const matches = [...grouped.values()]
+      .map((item) => ({
+        ...item,
+        typesText: [...item.types].sort().join("/"),
+        expiryText: [...item.expiries].sort((a, b) => expirySortValue(a) - expirySortValue(b))[0] || "",
+        label: `${item.asset} | ${item.exchange} | ${[...item.types].sort().join("/")}`,
+        rankText: `${item.asset} ${item.displayName} ${item.exchange} ${[...item.types].join(" ")} ${item.searchText}`.toUpperCase()
+      }))
+      .filter((item) => (!query || item.rankText.includes(query)) && (chainSearchCategory() === "all" || item.category === chainSearchCategory()))
+      .sort((a, b) => {
+        const aExact = a.asset === query ? 0 : a.asset.startsWith(query) ? 1 : 2;
+        const bExact = b.asset === query ? 0 : b.asset.startsWith(query) ? 1 : 2;
+        if (aExact !== bExact) return aExact - bExact;
+        const exchangeRank = (name) => name === scriptExchange() ? 0 : name === "NSE" ? 1 : name === "BSE" ? 2 : 3;
+        const exchangeCompare = exchangeRank(a.exchange) - exchangeRank(b.exchange);
+        if (exchangeCompare) return exchangeCompare;
+        return a.asset.localeCompare(b.asset);
+      });
+    return matches.slice(0, query ? 80 : 40);
+  }
+
+  function groupedChainScriptMatches() {
+    const groups = new Map();
+    for (const item of chainScriptMatches()) {
+      const key = item.category || "stock";
+      const label = key === "stock" ? "Cash" : key === "future" ? "Futures" : key === "option" ? "Options" : categoryLabel(key);
+      const current = groups.get(key) || { key, label, items: [] };
+      current.items.push(item);
+      groups.set(key, current);
+    }
+    const order = ["index", "stock", "future", "option", "commodity"];
+    return [...groups.values()].sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+  }
+
+  async function chooseChainScript(item) {
+    if (!item) return;
+    setChainSearchText(item.asset);
+    setChainSearchOpen(false);
+    const rows = item.exchange === scriptExchange()
+      ? scriptCache().rows || []
+      : chainSearchRows().filter((row) => row.exchange === item.exchange);
+    const sameAsset = rows.filter((row) => (row.asset || row.symbol) === item.asset);
+    const categoryPreferred = item.category === "index"
+      ? ["INDEX", "OPT", "FUT", "STOCK"]
+      : item.category === "future" || item.category === "commodity"
+        ? ["FUT", "OPT", "INDEX", "STOCK"]
+        : item.category === "option"
+          ? ["OPT", "FUT", "INDEX", "STOCK"]
+          : ["STOCK", "INDEX", "OPT", "FUT"];
+    const script = categoryPreferred
+      .map((kind) => sameAsset.find((row) => scriptKind(row) === kind || (kind === "INDEX" && String(row.assetType || "").toUpperCase().includes("INDEX"))))
+      .find(Boolean)
+      || sameAsset[0]
+      || preferredScriptForUnderlying(item.asset);
+    if (script) {
+      autoChainSearchKey = `${item.exchange}|${item.asset}`;
+      autoChainLoadedKey = "";
+      await applyScript({ ...script, exchange: item.exchange, selectedCategory: item.category });
+    }
+  }
   function parseChainAtmFilter(rawValue, rows, atmValue) {
     const raw = String(rawValue || "").trim().toLowerCase();
-    if (!raw) return null;
+    if (!raw || raw === "full") return null;
     const atm = Number(atmValue);
     if (!Number.isFinite(atm)) return null;
     const match = raw.match(/([+-])?\s*(?:atm)?\s*([+-])?\s*(\d+(?:\.\d+)?)/);
@@ -384,7 +616,7 @@ function App() {
     if (!Number.isFinite(value) || value <= 0) return null;
     const strikes = rows.map((row) => Number(row.strike)).filter(Number.isFinite);
     const step = inferStrikeStep(strikes);
-    const distance = Number.isFinite(step) && step > 0 && Number.isInteger(value) && value <= 20
+    const distance = Number.isFinite(step) && step > 0 && Number.isInteger(value) && value <= 100
       ? value * step
       : value;
     if (sign === "+") return { min: atm, max: atm + distance };
@@ -430,18 +662,56 @@ function App() {
     return CHAIN_COLUMNS.find((column) => column.key === key)?.label || key;
   }
 
+  function rawNumber(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function oiChangeProps(option) {
+    if (!option) return { text: "--", tone: "oi-change" };
+    const oi = rawNumber(option.oi ?? option.open_interest);
+    const previousOi = rawNumber(option.previous_oi ?? option.previous_open_interest);
+    const change = optionOiChangeValue(option);
+    const rawPct = rawNumber(
+      option.oi_change_percent ??
+      option.oiChangePercent ??
+      option.oi_change_pct ??
+      option.open_interest_change_percent ??
+      option.change_in_oi_percent
+    );
+    const pct = rawPct ?? (change != null && previousOi ? (change / previousOi) * 100 : null);
+    const changeText = change == null ? "--" : formatCompact(Math.abs(change));
+    const pctText = pct == null ? "" : ` (${pct.toFixed(2)}%)`;
+    return {
+      text: `${change != null && change < 0 ? "-" : ""}${changeText}${pctText}`,
+      tone: change != null && change < 0 ? "oi-change down" : "oi-change up",
+      style: `--oi-bar:${Math.min(100, Math.round((Math.abs(change || 0) / maxOiChangeAbs()) * 100))}%`
+    };
+  }
+
   function optionCellProps(option, key) {
     switch (key) {
       case "ltp":
-        return { value: option?.ltp, money: true, tone: "ltp" };
+        return { value: pickOptionValue(option, ["ltp", "last_traded_price", "lastTradedPrice"]), money: true, tone: "ltp" };
       case "iv":
-        return { value: option?.iv, tone: "iv" };
+        return { value: normalizeLiveIv(pickOptionValue(option, ["iv", "IV", "iv_mid", "ivMid", "iv_percent", "ivPercent", "implied_volatility", "impliedVolatility", "volatility"])), tone: "iv" };
       case "gamma":
-        return { value: option?.gamma, digits: 5 };
+        return { value: pickOptionValue(option, ["gamma", "gamma_value", "gammaValue"]), digits: 5 };
+      case "theta":
+        return { value: pickOptionValue(option, ["theta", "theta_value", "thetaValue"]) };
+      case "vega":
+        return { value: pickOptionValue(option, ["vega", "vega_value", "vegaValue"]) };
       case "volume":
-        return { value: option?.volume, compact: true };
+        return { value: pickOptionValue(option, ["volume", "vol", "traded_volume", "tradedVolume"]), compact: true };
       case "oi":
-        return { value: option?.oi, compact: true, tone: "oi" };
+        return {
+          value: pickOptionValue(option, ["oi", "open_interest", "openInterest"]),
+          compact: true,
+          tone: "oi",
+          style: `--oi-bar:${Math.min(100, Math.round(((Math.abs(rawNumber(option?.oi ?? option?.open_interest) || 0)) / maxOiAbs()) * 100))}%`
+        };
+      case "oi_change":
+        return oiChangeProps(option);
       default:
         return { value: option?.[key] };
     }
@@ -489,11 +759,22 @@ function App() {
 
   async function nubraFetch(path, options = {}) {
     const target = new URL(path, `${environment()}/`);
-    const response = await fetch(`/api/proxy?url=${encodeURIComponent(target.toString())}`, {
-      method: options.method || "GET",
-      headers: { ...authHeaders(), ...(options.headers || {}) },
-      body: options.body
-    });
+    const controller = options.timeoutMs ? new AbortController() : null;
+    const timeout = controller ? window.setTimeout(() => controller.abort(), options.timeoutMs) : null;
+    let response;
+    try {
+      response = await fetch(`/api/proxy?url=${encodeURIComponent(target.toString())}`, {
+        method: options.method || "GET",
+        headers: { ...authHeaders(), ...(options.headers || {}) },
+        body: options.body,
+        signal: controller?.signal
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error(`Request timed out: ${path}`);
+      throw error;
+    } finally {
+      if (timeout != null) window.clearTimeout(timeout);
+    }
     const text = await response.text();
     let payload;
     try {
@@ -508,19 +789,42 @@ function App() {
     return payload;
   }
 
+  async function fetchTimeseriesWithIntervals(query, intervals = ROLLING_INTERVALS) {
+    let lastError = null;
+    for (const intervalValue of intervals) {
+      try {
+        const data = await nubraFetch("charts/timeseries", {
+          method: "POST",
+          body: JSON.stringify({
+            query: [{
+              ...query,
+              interval: intervalValue
+            }]
+          })
+        });
+        return { data, interval: intervalValue };
+      } catch (error) {
+        lastError = error;
+        const message = String(error?.message || "");
+        if (!message.startsWith("400:")) throw error;
+      }
+    }
+    throw lastError || new Error("No supported chart interval returned data.");
+  }
+
   function instrumentCacheKey(exchange = scriptExchange(), date = todayKey()) {
     return `${environment().includes("uat") ? "uat" : "prod"}:${date}:${exchange}`;
   }
 
   function normalizeInstrumentRow(row, exchangeValue) {
     const exchangeName = String(row.exchange || exchangeValue || "").toUpperCase();
-    const asset = String(row.asset || row.underlying || row.symbol || row.stock_name || "").trim().toUpperCase();
-    const symbolName = String(row.stock_name || row.symbol || row.display_name || row.displayName || asset).trim().toUpperCase();
-    const displayName = String(row.display_name || row.displayName || row.stock_name || row.symbol || row.zanskar_name || row.nubra_name || asset).trim();
-    const type = String(row.derivative_type || row.asset_type || (row.expiry ? "FUT" : "STOCK") || "").toUpperCase();
-    const assetType = String(row.asset_type || "").toUpperCase();
-    const expiry = row.expiry ? String(row.expiry) : "";
-    const optionType = String(row.option_type || row.ot || "").toUpperCase();
+    const asset = String(row.asset || row.underlying || row.underlying_symbol || row.underlyingSymbol || row.symbol || row.stock_name || row.name || "").trim().toUpperCase();
+    const symbolName = String(row.stock_name || row.trading_symbol || row.tradingSymbol || row.symbol || row.instrument || row.display_name || row.displayName || asset).trim().toUpperCase();
+    const displayName = String(row.display_name || row.displayName || row.stock_name || row.trading_symbol || row.symbol || row.name || row.zanskar_name || row.nubra_name || asset).trim();
+    const type = String(row.derivative_type || row.asset_type || row.instrument_type || row.instrumentType || (row.expiry ? "FUT" : "STOCK") || "").toUpperCase();
+    const assetType = String(row.asset_type || row.assetType || row.instrument_type || row.instrumentType || "").toUpperCase();
+    const expiry = String(row.expiry ?? row.expiry_date ?? row.expiryDate ?? "");
+    const optionType = String(row.option_type || row.optionType || row.ot || row.side || "").toUpperCase();
     const strike = row.strike_price ?? row.sp ?? "";
     const key = [
       exchangeName,
@@ -543,7 +847,7 @@ function App() {
       expiry,
       optionType,
       strike,
-      lotSize: row.lot_size ?? "",
+      lotSize: row.lot_size ?? row.lotSize ?? row.market_lot ?? row.marketLot ?? "",
       searchText: `${exchangeName} ${asset} ${symbolName} ${displayName} ${type} ${expiry} ${optionType}`.toUpperCase()
     };
   }
@@ -558,6 +862,168 @@ function App() {
     });
   }
 
+  function refdataPath(date, exchangeValue = "NSE") {
+    const exchangeName = String(exchangeValue || "NSE").toUpperCase();
+    return exchangeName === "NSE"
+      ? `refdata/refdata/${date}`
+      : `refdata/refdata/${date}?exchange=${encodeURIComponent(exchangeName)}`;
+  }
+
+  function parseCsvRows(text) {
+    const records = [];
+    let row = [];
+    let cell = "";
+    let quoted = false;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (char === '"') {
+        if (quoted && text[index + 1] === '"') {
+          cell += '"';
+          index += 1;
+        } else quoted = !quoted;
+      } else if (char === "," && !quoted) {
+        row.push(cell);
+        cell = "";
+      } else if ((char === "\n" || char === "\r") && !quoted) {
+        if (char === "\r" && text[index + 1] === "\n") index += 1;
+        row.push(cell);
+        cell = "";
+        if (row.some((value) => value.trim())) records.push(row);
+        row = [];
+      } else cell += char;
+    }
+    if (cell || row.length) {
+      row.push(cell);
+      if (row.some((value) => value.trim())) records.push(row);
+    }
+    if (records.length < 2) return [];
+    const headers = records[0].map((value) => value.replace(/^\uFEFF/, "").trim().toLowerCase());
+    return records.slice(1).map((values) => Object.fromEntries(headers.map((header, index) => [header, String(values[index] || "").trim()])));
+  }
+
+  function normalizeIndexMasterRow(row) {
+    const symbol = String(row.symbol || row.index_symbol || row.indexsymbol || row.stock_name || row.name || row.index_name || row.asset || "").trim().toUpperCase();
+    const asset = String(row.asset || symbol).trim().toUpperCase();
+    const exchangeName = String(row.exchange || row.exchange_code || "NSE").trim().toUpperCase();
+    if (!symbol && !asset) return null;
+    return {
+      key: `INDEX|${exchangeName}|${symbol || asset}`,
+      refId: row.ref_id || row.refid || null,
+      token: row.token || null,
+      exchange: exchangeName,
+      asset: asset || symbol,
+      symbol: symbol || asset,
+      displayName: row.display_name || row.index_name || row.name || asset || symbol,
+      type: "INDEX",
+      assetType: "INDEX",
+      expiry: "",
+      optionType: "",
+      strike: "",
+      lotSize: "",
+      searchText: `${exchangeName} ${asset} ${symbol} INDEX`.toUpperCase()
+    };
+  }
+
+  async function loadIndexMaster(force = false) {
+    const cacheKey = "nubraIndexMasterV2";
+    if (!force) {
+      try {
+        const cached = JSON.parse(localStorage.getItem(cacheKey) || "[]");
+        if (Array.isArray(cached) && cached.length) {
+          setIndexMasterRows(cached);
+          return cached;
+        }
+      } catch {}
+    }
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 10000);
+    try {
+      const indexUrl = "https://api.nubra.io/public/indexes?format=csv";
+      const response = await fetch(`/api/proxy?url=${encodeURIComponent(indexUrl)}`, { signal: controller.signal });
+      if (!response.ok) throw new Error(`Index master ${response.status}`);
+      const rows = parseCsvRows(await response.text()).map(normalizeIndexMasterRow).filter(Boolean);
+      if (!rows.length) throw new Error("Index master returned no rows");
+      setIndexMasterRows(rows);
+      localStorage.setItem(cacheKey, JSON.stringify(rows));
+      return rows;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  function extractRefdataRows(payload) {
+    const candidates = [
+      payload?.refdata,
+      payload?.data?.refdata,
+      payload?.result?.refdata,
+      payload?.data?.instruments,
+      payload?.result?.instruments,
+      payload?.instruments,
+      payload?.scripts,
+      payload?.data,
+      payload?.result,
+      payload?.results
+    ];
+    for (const candidate of candidates) {
+      if (!Array.isArray(candidate)) continue;
+      if (candidate.length === 1 && Array.isArray(candidate[0]?.refdata)) return candidate[0].refdata;
+      return candidate;
+    }
+    const visit = (value, depth = 0) => {
+      if (depth > 4 || value == null) return [];
+      if (Array.isArray(value)) {
+        const looksLikeScripts = value.some((row) => row && typeof row === "object" && (
+          row.asset || row.underlying || row.symbol || row.stock_name || row.trading_symbol || row.ref_id
+        ));
+        if (looksLikeScripts) return value;
+        for (const item of value) {
+          const nested = visit(item, depth + 1);
+          if (nested.length) return nested;
+        }
+        return [];
+      }
+      if (typeof value === "object") {
+        for (const nestedValue of Object.values(value)) {
+          const nested = visit(nestedValue, depth + 1);
+          if (nested.length) return nested;
+        }
+      }
+      return [];
+    };
+    return visit(payload);
+  }
+
+  async function readRecentScriptCache(exchangeName, days = 7) {
+    for (let offset = 0; offset <= days; offset += 1) {
+      const date = new Date();
+      date.setDate(date.getDate() - offset);
+      const cached = await readInstrumentCache(instrumentCacheKey(exchangeName, dateKey(date)));
+      if (cached?.rows?.length) return cached;
+    }
+    return null;
+  }
+
+  async function downloadRecentScripts(exchangeName, days = 3) {
+    let lastError = null;
+    for (let offset = 0; offset <= days; offset += 1) {
+      const date = new Date();
+      date.setDate(date.getDate() - offset);
+      if (date.getDay() === 0 || date.getDay() === 6) continue;
+      const sourceDate = dateKey(date);
+      try {
+        const data = await nubraFetch(refdataPath(sourceDate, exchangeName), { timeoutMs: 8000 });
+        const rows = sortInstruments(extractRefdataRows(data)
+          .map((row) => normalizeInstrumentRow(row, exchangeName))
+          .filter((row) => row.asset || row.symbol));
+        if (rows.length) return { rows, sourceDate };
+      } catch (error) {
+        lastError = error;
+        if (/^(401|403):/.test(String(error?.message || ""))) throw error;
+      }
+    }
+    throw lastError || new Error(`No ${exchangeName} scripts returned for recent trading dates.`);
+  }
+
   async function loadCachedScripts(exchangeValue = scriptExchange(), force = false) {
     if (!authed()) {
       setScriptStatus("Login to download scripts");
@@ -566,8 +1032,9 @@ function App() {
     const exchangeName = String(exchangeValue || "NSE").toUpperCase();
     const date = todayKey();
     const key = instrumentCacheKey(exchangeName, date);
+    const fallback = await readRecentScriptCache(exchangeName, 7);
     if (!force) {
-      const cached = await readInstrumentCache(key);
+      const cached = await readInstrumentCache(key) || fallback;
       if (cached?.rows?.length) {
         if (!Object.prototype.hasOwnProperty.call(cached.rows[0], "assetType")) {
           return loadCachedScripts(exchangeName, true);
@@ -579,14 +1046,42 @@ function App() {
     }
 
     setScriptStatus(`Downloading ${exchangeName} scripts`);
-    const data = await nubraFetch(`refdata/refdata/${date}?exchange=${exchangeName}`);
-    const rawRows = Array.isArray(data.refdata) ? data.refdata : [];
-    const rows = sortInstruments(rawRows.map((row) => normalizeInstrumentRow(row, exchangeName)));
-    const record = { key, date, exchange: exchangeName, rows, downloadedAt: new Date().toISOString() };
-    await writeInstrumentCache(record);
-    setScriptCache(record);
-    setScriptStatus(`${exchangeName} ready: ${rows.length.toLocaleString("en-IN")} instruments`);
-    return rows;
+    try {
+      const { rows, sourceDate } = await downloadRecentScripts(exchangeName, 3);
+      const record = { key, date, sourceDate, exchange: exchangeName, rows, downloadedAt: new Date().toISOString() };
+      await writeInstrumentCache(record);
+      setScriptCache(record);
+      setScriptStatus(`${exchangeName} ready: ${rows.length.toLocaleString("en-IN")} instruments`);
+      return rows;
+    } catch (error) {
+      if (!fallback?.rows?.length) throw error;
+      setScriptCache(fallback);
+      setScriptStatus(`${exchangeName} cached: ${fallback.rows.length.toLocaleString("en-IN")} instruments`);
+      return fallback.rows;
+    }
+  }
+
+  async function loadChainSearchRows() {
+    if (!authed()) return [];
+    const allRows = [];
+    const errors = [];
+    for (const exchangeName of INSTRUMENT_EXCHANGES) {
+      try {
+        const cached = await readRecentScriptCache(exchangeName);
+        if (cached?.rows?.length) {
+          allRows.push(...cached.rows);
+          continue;
+        }
+        const { rows } = await downloadRecentScripts(exchangeName, 3);
+        allRows.push(...rows);
+      } catch (error) {
+        errors.push(`${exchangeName}: ${error?.message || "unavailable"}`);
+      }
+    }
+    setChainSearchRows(allRows);
+    if (!allRows.length) throw new Error(errors.join(" · ") || "No instrument masters returned.");
+    setScriptStatus(`All exchanges: ${allRows.length.toLocaleString("en-IN")} tradable instruments`);
+    return allRows;
   }
 
   async function refreshAllScripts() {
@@ -630,11 +1125,32 @@ function App() {
     return Number.isFinite(n) && n > 0 ? n : Number.MAX_SAFE_INTEGER;
   }
 
+  function parseExpiryDate(expiry) {
+    const raw = String(expiry || "").trim();
+    const compact = raw.match(/^(\d{4})(\d{2})(\d{2})$/);
+    const dashed = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const parts = compact || dashed;
+    if (!parts) return null;
+    const year = Number(parts[1]);
+    const month = Number(parts[2]);
+    const day = Number(parts[3]);
+    const date = new Date(year, month - 1, day);
+    return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null;
+  }
+
+  function daysUntilExpiry(expiry) {
+    const expiryDate = parseExpiryDate(expiry);
+    if (!expiryDate) return null;
+    const today = new Date();
+    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    return Math.max(0, Math.ceil((expiryDate.getTime() - start.getTime()) / 86400000));
+  }
+
   function mcxFutureForAsset(assetValue, expiryValue = "") {
     const asset = String(assetValue || "").trim().toUpperCase();
     const expiry = String(expiryValue || "");
     if (!asset) return null;
-    const rows = (scriptCache().rows || []).filter((row) =>
+    const rows = [...(scriptCache().rows || []), ...chainSearchRows()].filter((row) =>
       row.exchange === "MCX" &&
       (row.asset === asset || row.symbol === asset) &&
       scriptKind(row) === "FUT"
@@ -659,7 +1175,7 @@ function App() {
     const cached = mcxMarketSymbol(sym, expiryValue);
     if (cached && cached !== sym) return cached;
     const date = rollStart().slice(0, 10) || todayKey();
-    const data = await nubraFetch(`refdata/refdata/${date}?exchange=MCX`);
+    const data = await nubraFetch(refdataPath(date, "MCX"));
     const rows = (Array.isArray(data.refdata) ? data.refdata : [])
       .filter((row) =>
         String(row.asset || row.underlying || "").trim().toUpperCase() === sym &&
@@ -679,7 +1195,7 @@ function App() {
 
   function preferredScriptForUnderlying(assetValue) {
     const asset = String(assetValue || "").trim().toUpperCase();
-    const rows = (scriptCache().rows || []).filter((row) => row.asset === asset || row.symbol === asset);
+    const rows = [...(scriptCache().rows || []), ...chainSearchRows()].filter((row) => row.asset === asset || row.symbol === asset);
     if (!rows.length) return null;
     const ranked = [...rows].sort((a, b) => {
       const aKind = scriptKind(a);
@@ -696,7 +1212,7 @@ function App() {
 
   function preferredScriptForSearchItem(item) {
     if (!item) return null;
-    const rows = scriptCache().rows || [];
+    const rows = [...(scriptCache().rows || []), ...chainSearchRows()];
     if (item.rowKey) {
       const exact = rows.find((row) => row.key === item.rowKey);
       if (exact) return { ...exact, selectedCategory: item.category };
@@ -704,6 +1220,20 @@ function App() {
     if (item.category === "commodity") {
       const future = mcxFutureForAsset(item.asset, item.expiry);
       if (future) return { ...future, selectedCategory: item.category };
+    }
+    if (item.category === "index") {
+      const indexRow = indexMasterRows().find((row) =>
+        row.exchange === item.exchange && (row.asset === item.asset || row.symbol === item.symbol)
+      );
+      return {
+        ...(indexRow || item),
+        asset: item.asset,
+        symbol: item.symbol || item.asset,
+        exchange: item.exchange,
+        type: "INDEX",
+        assetType: "INDEX",
+        selectedCategory: "index"
+      };
     }
     const matches = rows.filter((row) => {
       if ((row.asset || row.symbol) !== item.asset) return false;
@@ -726,11 +1256,34 @@ function App() {
       .sort((a, b) => expirySortValue(a) - expirySortValue(b));
   }
 
+  function optionExpiriesForUnderlying(assetValue, rows = scriptCache().rows || []) {
+    const asset = String(assetValue || "").trim().toUpperCase();
+    return [...new Set(rows
+      .filter((row) => {
+        const rowAsset = String(row.asset || row.symbol || "").trim().toUpperCase();
+        return rowAsset === asset && scriptKind(row) === "OPT" && row.expiry;
+      })
+      .map((row) => String(row.expiry)))]
+      .sort((a, b) => expirySortValue(a) - expirySortValue(b));
+  }
+
+  function firstValidExpiry(current, expiries) {
+    const selected = String(current || "");
+    return selected && expiries.includes(selected) ? selected : expiries[0] || "";
+  }
+
   function setUnifiedExpiry(expiry) {
     setRollExpiry(expiry);
     setChainExpiry(expiry);
     setRollExpiries((items) => items.includes(expiry) || !expiry ? items : [expiry, ...items]);
     setChainExpiries((items) => items.includes(expiry) || !expiry ? items : [expiry, ...items]);
+  }
+
+  function selectChainExpiry(expiry) {
+    stopChainLive();
+    setChainExpiry(expiry);
+    setChainData(null);
+    setChainExpiryMenuOpen(false);
   }
 
   function setUnifiedStart(value) {
@@ -745,70 +1298,109 @@ function App() {
 
   async function applyScript(script) {
     if (!script) return;
+    setInstrumentSwitching(true);
     const exchangeName = String(script.exchange || scriptExchange()).toUpperCase();
-    const kind = scriptKind(script);
-    const underlying = getScriptUnderlying(script);
-    const tradableSymbol = String(script.symbol || underlying).trim().toUpperCase();
-    const isIndexAsset = String(script.assetType || "").toUpperCase().includes("INDEX");
-    const selectedCategory = String(script.selectedCategory || "").toLowerCase();
-    const chartType = selectedCategory === "index" || (isIndexAsset && section() === "market")
-      ? "INDEX"
-      : kind === "OPT" || kind === "FUT"
-        ? kind
-        : exchangeName === "MCX"
-          ? "FUT"
-          : "STOCK";
-    const displaySymbol = chartType === "INDEX" ? underlying : tradableSymbol;
+    try {
+      setScriptExchange(exchangeName);
+      const loadedRows = [...(scriptCache().rows || []), ...chainSearchRows()]
+        .filter((row) => row.exchange === exchangeName);
+      let exchangeRows = loadedRows;
+      if (!loadedRows.length) {
+        try {
+          exchangeRows = await loadCachedScripts(exchangeName, false);
+        } catch {
+          exchangeRows = [];
+        }
+      }
+      const kind = scriptKind(script);
+      const underlying = getScriptUnderlying(script);
+      const tradableSymbol = String(script.symbol || underlying).trim().toUpperCase();
+      const isIndexAsset = String(script.assetType || "").toUpperCase().includes("INDEX");
+      const selectedCategory = String(script.selectedCategory || "").toLowerCase();
+      const chartType = selectedCategory === "index" || (isIndexAsset && section() === "market")
+        ? "INDEX"
+        : kind === "OPT" || kind === "FUT"
+          ? kind
+          : exchangeName === "MCX"
+            ? "FUT"
+            : "STOCK";
+      const displaySymbol = chartType === "INDEX" ? underlying : tradableSymbol;
+      const optionUnderlying = underlying || tradableSymbol;
+      let expiries = optionExpiriesForUnderlying(optionUnderlying, exchangeRows);
+      if (!expiries.length && exchangeRows.length) {
+        expiries = optionExpiriesForUnderlying(optionUnderlying, [...exchangeRows, ...chainSearchRows()]);
+      }
+      if (!expiries.length && section() !== "market") {
+        try {
+          const freshRows = await loadCachedScripts(exchangeName, true);
+          expiries = optionExpiriesForUnderlying(optionUnderlying, freshRows);
+        } catch {}
+      }
+      const selectedExpiry = firstValidExpiry(script.expiry, expiries);
 
-    setScriptUnderlying(underlying || tradableSymbol);
-    localStorage.setItem("nubraScriptUnderlying", underlying || tradableSymbol);
+      stopChainLive();
+      stopRollLive();
 
-    setSymbol(displaySymbol);
-    setInstrumentType(chartType);
-    setExchange(exchangeName);
+      setScriptUnderlying(optionUnderlying);
+      localStorage.setItem("nubraScriptUnderlying", optionUnderlying);
 
-    stopChainLive();
-    setChainSymbol(underlying || tradableSymbol);
-    setChainExchange(exchangeName);
-    setChainData(null);
-    const expiries = expiriesForUnderlying(underlying || tradableSymbol);
-    const selectedExpiry = script.expiry || expiries[0] || "";
-    setChainExpiries(expiries);
-    setChainExpiry(selectedExpiry);
+      setSymbol(displaySymbol);
+      setInstrumentType(chartType);
+      setExchange(exchangeName);
 
-    setRollSymbol(chartType === "INDEX" ? underlying : underlying || tradableSymbol);
-    setRollType(chartType === "INDEX" ? "INDEX" : exchangeName === "MCX" ? "FUT" : "STOCK");
-    setRollExchange(exchangeName);
-    setRollExpiry(selectedExpiry);
-    setRollExpiries(expiries);
+      setChainSymbol(optionUnderlying);
+      setChainExchange(exchangeName);
+      setChainData(null);
+      setChainExpiries(expiries);
+      setChainExpiry(selectedExpiry);
 
-    if (section() === "market") {
-      await loadSpotPrice();
-      await loadPriceChart();
-      return;
+      setRollSymbol(optionUnderlying);
+      setRollType(chartType === "INDEX" ? "INDEX" : exchangeName === "MCX" ? "FUT" : "STOCK");
+      setRollExchange(exchangeName);
+      setRollExpiry(selectedExpiry);
+      setRollExpiries(expiries);
+
+      if (!expiries.length && section() !== "market") {
+        const message = `No option expiries found for ${exchangeName} ${optionUnderlying}`;
+        setChainStatus(message);
+        setRollStatus(message);
+        return;
+      }
+
+      if (section() === "market") {
+        await loadSpotPrice();
+        await loadPriceChart();
+        return;
+      }
+      if (section() === "chain") {
+        autoChainLoadedKey = "";
+        await loadOptionChain();
+        return;
+      }
+      autoRollLoadedKey = "";
+      await loadRollingStraddle();
+    } finally {
+      setInstrumentSwitching(false);
     }
-    if (section() === "chain") {
-      autoChainLoadedKey = "";
-      await loadOptionChain();
-      return;
-    }
-    autoRollLoadedKey = "";
-    await loadRollingStraddle();
   }
 
   const scriptUnderlyings = createMemo(() => {
     const grouped = new Map();
-    for (const row of scriptCache().rows || []) {
+    for (const row of [...(scriptCache().rows || []), ...chainSearchRows(), ...indexMasterRows()]) {
       const asset = row.asset || row.symbol;
       if (!asset) continue;
+      const isCleanName = (name) => name && name === asset || (!name.includes("CE") && !name.includes("PE") && !name.includes("FUT") && !/\d{5,}/.test(name));
       const current = grouped.get(asset) || {
         asset,
         exchange: row.exchange,
-        displayName: row.displayName || asset,
+        displayName: asset,
         types: new Set(),
         expiries: new Set(),
         count: 0
       };
+      if (row.displayName && isCleanName(row.displayName) && current.displayName === asset) {
+        current.displayName = row.displayName;
+      }
       if (String(row.assetType || "").toUpperCase().includes("INDEX")) current.types.add("INDEX");
       current.types.add(scriptKind(row));
       if (row.expiry) current.expiries.add(row.expiry);
@@ -826,7 +1418,7 @@ function App() {
   });
 
   const symbolSearchItems = createMemo(() => {
-    const rows = scriptCache().rows || [];
+    const rows = [...(scriptCache().rows || []), ...chainSearchRows(), ...indexMasterRows()];
     const items = [];
     const seen = new Set();
     const addItem = (item) => {
@@ -853,13 +1445,14 @@ function App() {
 
     for (const item of scriptUnderlyings()) {
       if (item.types.has("INDEX")) {
+        const indexLabel = item.displayName !== item.asset ? item.displayName : `${item.asset} Index`;
         addItem({
           category: "index",
           asset: item.asset,
           symbol: item.asset,
           exchange: item.exchange,
           title: item.asset,
-          subtitle: `${item.asset} Index`,
+          subtitle: `${indexLabel} · ${item.exchange}`,
           badge: item.asset.slice(0, 2)
         });
       }
@@ -934,6 +1527,18 @@ function App() {
         if (!query) return true;
         return query.split(/\s+/).every((part) => item.searchText.includes(part));
       })
+      .sort((a, b) => {
+        if (!query) return 0;
+        const rank = (item) => {
+          const asset = String(item.asset || "").toUpperCase();
+          const symbol = String(item.symbol || "").toUpperCase();
+          const title = String(item.title || "").toUpperCase();
+          if (asset === query || symbol === query || title === query) return 0;
+          if (asset.startsWith(query) || symbol.startsWith(query) || title.startsWith(query)) return 1;
+          return 2;
+        };
+        return rank(a) - rank(b) || String(a.asset).localeCompare(String(b.asset));
+      })
       .slice(0, 120);
   });
 
@@ -965,6 +1570,68 @@ function App() {
     }));
     setMarketStrip(results);
     setMarketStripStatus(results.some((item) => item.ok) ? "Live snapshot" : "Market data unavailable");
+  }
+
+  function stopMarketStripLive() {
+    if (marketStripReconnectTimer) {
+      window.clearTimeout(marketStripReconnectTimer);
+      marketStripReconnectTimer = null;
+    }
+    const socket = marketStripSocket;
+    marketStripSocket = null;
+    if (socket) socket.close();
+  }
+
+  function startMarketStripLive() {
+    stopMarketStripLive();
+    if (!authed()) return;
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${location.host}/ws/live`);
+    marketStripSocket = socket;
+    socket.onopen = () => {
+      socket.send(JSON.stringify({
+        type: "subscribe",
+        environment: environment().includes("uat") ? "uat" : "prod",
+        token: token().replace("Bearer ", "").trim(),
+        deviceId: deviceId().trim(),
+        indexSubscriptions: [
+          { exchange: "NSE", symbols: ["NIFTY", "BANKNIFTY"] },
+          { exchange: "BSE", symbols: ["SENSEX"] }
+        ]
+      }));
+      setMarketStripStatus("Connecting live indices");
+    };
+    socket.onmessage = (event) => {
+      let message;
+      try { message = JSON.parse(event.data); } catch { return; }
+      if (message.event === "status" && (message.status === "connected" || message.status === "subscribed")) {
+        setMarketStripStatus("Live WebSocket");
+      }
+      if (message.event !== "index" || !message.data) return;
+      const ticks = Array.isArray(message.data) ? message.data : [message.data];
+      for (const tick of ticks) {
+        const tickName = String(tick?.indexname || tick?.index_name || tick?.symbol || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+        const tickExchange = String(tick?.exchange || "").toUpperCase();
+        setMarketStrip((items) => items.map((item) => {
+          const itemName = String(item.instrument || item.label).toUpperCase().replace(/[^A-Z0-9]/g, "");
+          if (itemName !== tickName || (tickExchange && item.exchange !== tickExchange)) return item;
+          return {
+            ...item,
+            price: tick.index_value ?? tick.indexValue ?? item.price,
+            prevClose: tick.prev_close ?? tick.prevClose ?? item.prevClose,
+            change: tick.changepercent ?? tick.change_percent ?? tick.changePercent ?? item.change,
+            ok: true
+          };
+        }));
+      }
+    };
+    socket.onerror = () => setMarketStripStatus("Live stream reconnecting");
+    socket.onclose = () => {
+      if (marketStripSocket !== socket) return;
+      marketStripSocket = null;
+      setMarketStripStatus("Live stream reconnecting");
+      if (authed()) marketStripReconnectTimer = window.setTimeout(startMarketStripLive, 3000);
+    };
   }
 
   async function run(action) {
@@ -1169,7 +1836,7 @@ function App() {
 
   async function rollingOptionRows() {
     const date = rollStart().slice(0, 10) || new Date().toISOString().slice(0, 10);
-    const data = await nubraFetch(`refdata/refdata/${date}?exchange=${rollExchange()}`);
+    const data = await nubraFetch(refdataPath(date, rollExchange()));
     const refRows = Array.isArray(data.refdata) ? data.refdata : [];
     const sym = rollSymbol().trim().toUpperCase();
     return refRows
@@ -1199,14 +1866,15 @@ function App() {
     const expiries = [...new Set(rows.map((row) => row.expiry))].sort();
     if (!expiries.length) throw new Error("No option expiries found.");
     setRollExpiries(expiries);
-    setRollExpiry((current) => current || expiries[0]);
+    setRollExpiry((current) => firstValidExpiry(current, expiries));
     setRollStatus(`${expiries.length} expiries`);
+    return expiries;
   }
 
   async function loadOptionChainExpiries() {
     setChainStatus("Expiries");
     const date = new Date().toISOString().slice(0, 10);
-    const data = await nubraFetch(`refdata/refdata/${date}?exchange=${chainExchange()}`);
+    const data = await nubraFetch(refdataPath(date, chainExchange()));
     const refRows = Array.isArray(data.refdata) ? data.refdata : [];
     const sym = chainSymbol().trim().toUpperCase();
     const expiries = [...new Set(refRows
@@ -1220,8 +1888,137 @@ function App() {
       .sort();
     if (!expiries.length) throw new Error("No option expiries found for option chain.");
     setChainExpiries(expiries);
+    setChainExpiry((current) => firstValidExpiry(current, expiries));
     setChainStatus(`${expiries.length} expiries`);
     return expiries;
+  }
+
+  async function chainOptionRowsForDate(date) {
+    const data = await nubraFetch(refdataPath(date, chainExchange()));
+    const refRows = Array.isArray(data.refdata) ? data.refdata : [];
+    const sym = chainSymbol().trim().toUpperCase();
+    const expiry = String(chainData()?.expiry || chainExpiry() || "");
+    return refRows
+      .filter((row) => {
+        const asset = String(row.asset || row.underlying || "").toUpperCase();
+        const dtype = String(row.derivative_type || row.asset_type || "").toUpperCase();
+        const side = optionRowSide(row);
+        return asset === sym && dtype.includes("OPT") && (side === "CE" || side === "PE") && String(row.expiry || "") === expiry;
+      })
+      .map((row) => {
+        const aliases = optionSymbolAliases(row);
+        return {
+          name: aliases[0],
+          aliases,
+          side: optionRowSide(row),
+          strike: normalizeStrike(row.strike_price ?? row.sp)
+        };
+      })
+      .filter((row) => row.name && Number.isFinite(row.strike));
+  }
+
+  function chainSpotType() {
+    const sym = chainSymbol().trim().toUpperCase();
+    if (chainExchange() === "MCX") return "FUT";
+    const indexAssets = new Set(["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "INDIA VIX", "INDIAVIX"]);
+    if (indexAssets.has(sym)) return "INDEX";
+    const row = (scriptCache().rows || []).find((item) => {
+      const asset = String(item.asset || item.symbol || "").trim().toUpperCase();
+      return asset === sym && (scriptKind(item) === "INDEX" || String(item.assetType || "").includes("INDEX"));
+    });
+    return row ? "INDEX" : "STOCK";
+  }
+
+  function previousDayTenWindow() {
+    const start = new Date();
+    start.setDate(start.getDate() - 1);
+    start.setHours(10, 0, 0, 0);
+    const end = new Date(start.getTime() + 2 * 60 * 1000);
+    return { start, end, targetMs: start.getTime(), date: dateKey(start) };
+  }
+
+  function nearestPointValue(points, targetMs, rupeeValue = false) {
+    const parsed = (Array.isArray(points) ? points : [])
+      .map((point) => ({ ts: pointMs(point), value: pointNumber(point, rupeeValue) }))
+      .filter((point) => Number.isFinite(point.ts) && Number.isFinite(point.value) && point.value > 0)
+      .sort((a, b) => Math.abs(a.ts - targetMs) - Math.abs(b.ts - targetMs));
+    return parsed[0]?.value ?? null;
+  }
+
+  async function fetchChainSpotAtPreviousTen(windowInfo) {
+    const sym = chainSymbol().trim().toUpperCase();
+    const spotSym = chainExchange() === "MCX" ? await resolveMcxMarketSymbol(sym, chainExpiry()) : sym;
+    const { data } = await fetchTimeseriesWithIntervals({
+      exchange: chainExchange(),
+      type: chainSpotType(),
+      values: [spotSym],
+      fields: ["close"],
+      startDate: fromLocalInput(toLocalInput(windowInfo.start)),
+      endDate: fromLocalInput(toLocalInput(windowInfo.end)),
+      intraDay: false,
+      realTime: false
+    }, ["1m"]);
+    const symbolData = extractSymbolData(data, spotSym);
+    return nearestPointValue(symbolData?.close, windowInfo.targetMs, true);
+  }
+
+  function ivFromSymbolData(symbolData, targetMs) {
+    const mid = nearestPointValue(symbolData?.iv_mid, targetMs, false);
+    if (mid != null) return normalizeLiveIv(mid);
+    const bid = normalizeLiveIv(nearestPointValue(symbolData?.iv_bid, targetMs, false));
+    const ask = normalizeLiveIv(nearestPointValue(symbolData?.iv_ask, targetMs, false));
+    if (bid != null && ask != null) return (bid + ask) / 2;
+    return bid ?? ask;
+  }
+
+  async function fetchChainIvBaseline() {
+    const windowInfo = previousDayTenWindow();
+    const rows = await chainOptionRowsForDate(windowInfo.date);
+    const strikes = [...new Set(rows.map((row) => row.strike))].sort((a, b) => a - b);
+    if (!strikes.length) throw new Error("No previous-day option rows for IV baseline.");
+    const spot = await fetchChainSpotAtPreviousTen(windowInfo);
+    if (!Number.isFinite(spot)) throw new Error("No previous-day 10:00 spot close for IV baseline.");
+    const strike = nearestStrike(spot, strikes, inferStrikeStep(strikes));
+    const ce = rows.find((row) => row.strike === strike && row.side === "CE");
+    const pe = rows.find((row) => row.strike === strike && row.side === "PE");
+    const aliases = [...new Set([...(ce?.aliases || []), ...(pe?.aliases || [])])];
+    if (!aliases.length) throw new Error("No CE/PE symbols for IV baseline strike.");
+
+    const { data } = await fetchTimeseriesWithIntervals({
+      exchange: chainExchange(),
+      type: "OPT",
+      values: aliases,
+      fields: ["iv_mid", "iv_bid", "iv_ask"],
+      startDate: fromLocalInput(toLocalInput(windowInfo.start)),
+      endDate: fromLocalInput(toLocalInput(windowInfo.end)),
+      intraDay: false,
+      realTime: false
+    }, ["1m"]);
+
+    const values = data?.result?.[0]?.values || [];
+    const ivByName = new Map();
+    for (const entry of values) {
+      for (const [name, symbolData] of Object.entries(entry || {})) {
+        const iv = ivFromSymbolData(symbolData, windowInfo.targetMs);
+        if (iv != null) ivByName.set(String(name).toUpperCase(), iv);
+      }
+    }
+    const legIv = (row) => (row?.aliases || []).map((name) => ivByName.get(String(name).toUpperCase())).find((value) => value != null);
+    const ivs = [legIv(ce), legIv(pe)].filter((value) => value != null);
+    if (!ivs.length) throw new Error("No previous-day 10:00 CE/PE IV returned.");
+    const avgIv = ivs.reduce((sum, value) => sum + value, 0) / ivs.length;
+    console.log("[Option Chain] Previous day 10:00 IV", {
+      symbol: chainSymbol().trim().toUpperCase(),
+      exchange: chainExchange(),
+      expiry: chainData()?.expiry || chainExpiry(),
+      spotClose: spot,
+      strike,
+      ceIv: legIv(ce) ?? null,
+      peIv: legIv(pe) ?? null,
+      avgIv,
+      avgIvText: formatPlain(avgIv, 2)
+    });
+    return avgIv;
   }
 
   async function fetchOptionChainSnapshot(sym, expiry) {
@@ -1253,11 +2050,12 @@ function App() {
           setChainExpiries(chain.all_expiries.map(String).sort());
         }
         setChainStatus("Ready");
+        startChainLive();
         return;
       } catch (err) {
         lastError = err;
         const message = String(err?.message || "");
-        if (!message.toLowerCase().includes("invalid expiry")) throw err;
+        if (!message.startsWith("400:") && !message.toLowerCase().includes("invalid expiry")) throw err;
       }
     }
 
@@ -1338,7 +2136,12 @@ function App() {
       if (msg.event === "log" && msg.message) setChainStatus(msg.message.slice(0, 80));
       if (msg.event === "error") setChainStatus(msg.message || "Live error");
     };
-    ws.onclose = () => { chainLiveSocket = null; setChainLive(false); setChainStatus("Live stopped"); };
+    ws.onclose = () => {
+      if (chainLiveSocket !== ws) return;
+      chainLiveSocket = null;
+      setChainLive(false);
+      setChainStatus("Live stopped");
+    };
     ws.onerror = () => setChainStatus("WS error");
   }
 
@@ -1374,79 +2177,120 @@ function App() {
     );
   }
 
-  async function fetchRollingSeries(names, start, end, aliasToCanonical = new Map()) {
-    const seriesByName = new Map();
-    const batchSize = 8;
-    const total = Math.ceil(names.length / batchSize);
-    for (let b = 0; b < total; b++) {
-      const batch = names.slice(b * batchSize, (b + 1) * batchSize);
-      setRollStatus(`Batch ${b + 1}/${total}`);
-      const requests = rollExchange() === "MCX"
-        ? [
-            { type: "OPT", fields: ["l1bid", "l1ask", "iv_bid", "iv_ask", "iv_mid", "close"] },
-            { type: "CHAIN", fields: ["l1bid", "l1ask", "iv_bid", "iv_ask", "iv_mid", "close"] }
-          ]
-        : [{ type: "OPT", fields: ["l1bid", "l1ask", "iv_bid", "iv_ask"] }];
-      let values = [];
-      let lastError = null;
-      for (const request of requests) {
-        try {
-          const data = await nubraFetch("charts/timeseries", {
-            method: "POST",
-            body: JSON.stringify({
-              query: [{
-                exchange: rollExchange(),
-                type: request.type,
-                values: batch,
-                fields: request.fields,
-                startDate: start,
-                endDate: end,
-                interval: "1s",
-                intraDay: false,
-                realTime: false
-              }]
-            })
-          });
-          values = data?.result?.[0]?.values || [];
-          if (values.some((entry) => Object.values(entry || {}).some(symbolDataHasPoints))) break;
-        } catch (error) {
-          lastError = error;
+  function parseRollingSeriesValues(values, seriesByName, aliasToCanonical) {
+    for (const entry of values) {
+      for (const [name, symData] of Object.entries(entry)) {
+        const keyName = String(name || "").toUpperCase();
+        if (!symbolDataHasPoints(symData)) continue;
+        const canonicalName = aliasToCanonical.get(keyName) || keyName;
+        const parsePoints = (arr, rupee = false) =>
+          (Array.isArray(arr) ? arr : [])
+            .map((p) => ({ ts: pointMs(p), v: pointNumber(p, rupee) }))
+            .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.v))
+            .sort((a, b) => a.ts - b.ts);
+        const close = parsePoints(symData?.close, true);
+        const open = parsePoints(symData?.open, true);
+        const bid = parsePoints(symData?.l1bid, true);
+        const ask = parsePoints(symData?.l1ask, true);
+        const ivMid = parsePoints(symData?.iv_mid, false);
+        const priceFallback = close.length ? close : open;
+        const series = {
+          bid: bid.length ? bid : priceFallback,
+          ask: ask.length ? ask : priceFallback,
+          ivBid: parsePoints(symData?.iv_bid, false),
+          ivAsk: parsePoints(symData?.iv_ask, false),
+          ivMid
+        };
+        if ((series.bid.length || series.ask.length) && !seriesByName.has(canonicalName)) {
+          seriesByName.set(canonicalName, series);
+        }
+        if ((series.bid.length || series.ask.length) && !seriesByName.has(keyName)) {
+          seriesByName.set(keyName, series);
         }
       }
-      if (!values.length && lastError) throw lastError;
-      for (const entry of values) {
-        for (const [name, symData] of Object.entries(entry)) {
-          const keyName = String(name || "").toUpperCase();
-          if (!symbolDataHasPoints(symData)) continue;
-          const canonicalName = aliasToCanonical.get(keyName) || keyName;
-          const parsePoints = (arr, rupee = false) =>
-            (Array.isArray(arr) ? arr : [])
-              .map((p) => ({ ts: pointMs(p), v: pointNumber(p, rupee) }))
-              .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.v))
-              .sort((a, b) => a.ts - b.ts);
-          const close = parsePoints(symData?.close, true);
-          const open = parsePoints(symData?.open, true);
-          const bid = parsePoints(symData?.l1bid, true);
-          const ask = parsePoints(symData?.l1ask, true);
-          const ivMid = parsePoints(symData?.iv_mid, false);
-          const priceFallback = close.length ? close : open;
-          const series = {
-            bid: bid.length ? bid : priceFallback,
-            ask: ask.length ? ask : priceFallback,
-            ivBid: parsePoints(symData?.iv_bid, false),
-            ivAsk: parsePoints(symData?.iv_ask, false),
-            ivMid
-          };
-          if ((series.bid.length || series.ask.length) && !seriesByName.has(canonicalName)) {
-            seriesByName.set(canonicalName, series);
-          }
-          if ((series.bid.length || series.ask.length) && !seriesByName.has(keyName)) {
-            seriesByName.set(keyName, series);
-          }
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
     }
+  }
+
+  async function fetchRollingBatch(batch, start, end, intervalValue) {
+    const requests = rollExchange() === "MCX"
+      ? [
+          { type: "OPT", fields: ["l1bid", "l1ask", "iv_bid", "iv_ask", "iv_mid", "close"] },
+          { type: "CHAIN", fields: ["l1bid", "l1ask", "iv_bid", "iv_ask", "iv_mid", "close"] }
+        ]
+      : [{ type: "OPT", fields: ["l1bid", "l1ask", "iv_bid", "iv_ask"] }];
+    let lastError = null;
+    for (const request of requests) {
+      try {
+        const { data } = await fetchTimeseriesWithIntervals({
+          exchange: rollExchange(),
+          type: request.type,
+          values: batch,
+          fields: request.fields,
+          startDate: start,
+          endDate: end,
+          intraDay: false,
+          realTime: false
+        }, [intervalValue]);
+        const values = data?.result?.[0]?.values || [];
+        if (values.some((entry) => Object.values(entry || {}).some(symbolDataHasPoints))) return values;
+      } catch (error) {
+        lastError = error;
+        const message = String(error?.message || "");
+        if (message.startsWith("400:") && intervalValue === "1s") {
+          try {
+            const { data } = await fetchTimeseriesWithIntervals({
+              exchange: rollExchange(),
+              type: request.type,
+              values: batch,
+              fields: request.fields,
+              startDate: start,
+              endDate: end,
+              intraDay: false,
+              realTime: false
+            }, ["1m"]);
+            const values = data?.result?.[0]?.values || [];
+            if (values.some((entry) => Object.values(entry || {}).some(symbolDataHasPoints))) return values;
+          } catch (fallbackError) {
+            lastError = fallbackError;
+          }
+        }
+      }
+    }
+    if (lastError) throw lastError;
+    return [];
+  }
+
+  async function fetchRollingSeries(names, start, end, aliasToCanonical = new Map(), intervalValue = "1s") {
+    const seriesByName = new Map();
+    const batches = [];
+    for (let i = 0; i < names.length; i += ROLLING_BATCH_SIZE) {
+      batches.push(names.slice(i, i + ROLLING_BATCH_SIZE));
+    }
+    let cursor = 0;
+    let completed = 0;
+    let firstError = null;
+    const workerCount = Math.min(ROLLING_FETCH_CONCURRENCY, batches.length);
+    setRollStatus(`Fetching 0/${batches.length} batches`);
+
+    const worker = async () => {
+      while (cursor < batches.length) {
+        const batchIndex = cursor;
+        cursor += 1;
+        try {
+          const values = await fetchRollingBatch(batches[batchIndex], start, end, intervalValue);
+          parseRollingSeriesValues(values, seriesByName, aliasToCanonical);
+        } catch (error) {
+          firstError ??= error;
+        } finally {
+          completed += 1;
+          setRollStatus(`Fetching ${completed}/${batches.length} batches`);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: workerCount }, worker));
+    if (!seriesByName.size && firstError) throw firstError;
     return seriesByName;
   }
 
@@ -1773,7 +2617,12 @@ function App() {
       if (msg.event === "log" && msg.message) setRollStatus(msg.message.slice(0, 90));
       if (msg.event === "error") setRollStatus(msg.message || "Live error");
     };
-    ws.onclose = () => { rollLiveSocket = null; setRollLive(false); setRollStatus("Live stopped"); };
+    ws.onclose = () => {
+      if (rollLiveSocket !== ws) return;
+      rollLiveSocket = null;
+      setRollLive(false);
+      setRollStatus("Live stopped");
+    };
     ws.onerror = () => setRollStatus("WS error");
   }
 
@@ -1806,6 +2655,15 @@ function App() {
   function rollLineTitle(name, target) {
     const label = target === "iv" ? "IV" : target === "ask" ? "Ask" : "Bid";
     return `${name || label} ${label}`;
+  }
+
+  function toggleRollSeries(key, seriesIndex) {
+    const visible = !rollSeriesVisibility()[key];
+    setRollSeriesVisibility((current) => ({ ...current, [key]: visible }));
+    const storageKey = key === "iv" ? "Iv" : key[0].toUpperCase() + key.slice(1);
+    localStorage.setItem(`nubraRollSeries${storageKey}`, visible ? "1" : "0");
+    rollChart?.setSeries(seriesIndex, { show: visible });
+    rollChart?.redraw();
   }
 
   function addRollLine() {
@@ -1879,9 +2737,9 @@ function App() {
   function rollChartSeriesConfig() {
     const base = [
       {},
-      { label: "Bid", scale: "price", stroke: "#21d19f", width: 1.6, points: { show: false } },
-      { label: "Ask", scale: "price", stroke: "#ffb15c", width: 1.6, points: { show: false } },
-      { label: "IV %", scale: "iv", stroke: "#a78bfa", width: 1, dash: [5, 4], points: { show: false } }
+      { label: "Bid", scale: "price", show: rollSeriesVisibility().bid, stroke: "#21d19f", width: 1.6, points: { show: false } },
+      { label: "Ask", scale: "price", show: rollSeriesVisibility().ask, stroke: "#ffb15c", width: 1.6, points: { show: false } },
+      { label: "IV %", scale: "iv", show: rollSeriesVisibility().iv, stroke: "#a78bfa", width: 1, dash: [5, 4], points: { show: false } }
     ];
     for (const line of rollDrawnLines()) {
       base.push({
@@ -2134,6 +2992,28 @@ function App() {
               if (scaleKey === "iv") return `IV ${value.toFixed(2)}%`;
               return `Price ${rupee.format(value)}`;
             };
+            const nextAxisGuideMode = () => {
+              const count = Math.max(0, Number(localStorage.getItem("nubraAxisGuideViews")) || 0);
+              if (count < 3) {
+                const next = count + 1;
+                localStorage.setItem("nubraAxisGuideViews", String(next));
+                return { type: "guide", count: next };
+              }
+              if (localStorage.getItem("nubraAxisHelpPrompted") !== "1") {
+                localStorage.setItem("nubraAxisHelpPrompted", "1");
+                return { type: "help" };
+              }
+              return { type: "value" };
+            };
+            const axisGuidanceText = (item) => {
+              if (item.guideMode?.type === "guide") {
+                return `${axisTitle(item.scale)} Use the mouse wheel to zoom. · Tip ${item.guideMode.count}/3`;
+              }
+              if (item.guideMode?.type === "help") {
+                return "For all chart controls, click the i button in the main header.";
+              }
+              return "";
+            };
             const showAxisTooltip = (item, event) => {
               const scale = u.scales[item.scale];
               if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
@@ -2142,7 +3022,7 @@ function App() {
                 ? Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width)))
                 : Math.min(1, Math.max(0, 1 - ((event.clientY - rect.top) / Math.max(1, rect.height))));
               const value = scale.min + (scale.max - scale.min) * pct;
-              axisTooltip.textContent = axisTooltipText(item.scale, value);
+              axisTooltip.textContent = [axisTooltipText(item.scale, value), axisGuidanceText(item)].filter(Boolean).join("\n");
               const rootRect = u.root.getBoundingClientRect();
               axisTooltip.hidden = false;
               const tipRect = axisTooltip.getBoundingClientRect();
@@ -2151,8 +3031,9 @@ function App() {
               axisTooltip.style.left = `${left}px`;
               axisTooltip.style.top = `${top}px`;
             };
-            const hideAxisTooltip = () => {
+            const hideAxisTooltip = (item) => {
               axisTooltip.hidden = true;
+              if (item) item.guideMode = null;
             };
             const doubleClick = () => {
               clearRollManualScales();
@@ -2174,14 +3055,18 @@ function App() {
                 axisPointerMove(event);
                 showAxisTooltip(item, event);
               };
-              item.pointerEnter = (event) => showAxisTooltip(item, event);
+              item.pointerEnter = (event) => {
+                item.guideMode = nextAxisGuideMode();
+                showAxisTooltip(item, event);
+              };
+              item.pointerLeave = () => hideAxisTooltip(item);
               item.el.addEventListener("wheel", item.wheel, { passive: false });
               item.el.addEventListener("pointerdown", item.pointerDown);
               item.el.addEventListener("pointermove", item.pointerMove);
               item.el.addEventListener("pointerup", axisPointerUp);
               item.el.addEventListener("pointercancel", axisPointerUp);
               item.el.addEventListener("pointerenter", item.pointerEnter);
-              item.el.addEventListener("pointerleave", hideAxisTooltip);
+              item.el.addEventListener("pointerleave", item.pointerLeave);
               item.el.addEventListener("click", keepManualScale);
               item.el.addEventListener("dblclick", doubleClick);
             }
@@ -2199,7 +3084,7 @@ function App() {
                 item.el.removeEventListener("pointerup", axisPointerUp);
                 item.el.removeEventListener("pointercancel", axisPointerUp);
                 item.el.removeEventListener("pointerenter", item.pointerEnter);
-                item.el.removeEventListener("pointerleave", hideAxisTooltip);
+                item.el.removeEventListener("pointerleave", item.pointerLeave);
                 item.el.removeEventListener("click", keepManualScale);
                 item.el.removeEventListener("dblclick", doubleClick);
               }
@@ -2252,9 +3137,9 @@ function App() {
         init: [(u) => {
           const wrap = u.root.querySelector(".u-wrap") || u.root;
           const defs = [
-            { cls: "roll-last-bid", color: "#21d19f", series: 1, scale: "price", side: "right" },
-            { cls: "roll-last-ask", color: "#ffb15c", series: 2, scale: "price", side: "right" },
-            { cls: "roll-last-iv", color: "#a78bfa", series: 3, scale: "iv", side: "left" },
+            { cls: "roll-last-bid", key: "bid", color: "#21d19f", series: 1, scale: "price", side: "right" },
+            { cls: "roll-last-ask", key: "ask", color: "#ffb15c", series: 2, scale: "price", side: "right" },
+            { cls: "roll-last-iv", key: "iv", color: "#a78bfa", series: 3, scale: "iv", side: "left" },
             { cls: "roll-last-time", color: "#7b8491", series: 0, scale: "x", side: "bottom" },
           ];
           for (const def of defs) {
@@ -2266,12 +3151,14 @@ function App() {
           }
         }],
         setData: [(u) => { updateLastLabels(u); }],
+        setSeries: [(u) => { updateLastLabels(u); }],
         setScale: [(u) => { updateLastLabels(u); }],
         setSize: [(u) => { updateLastLabels(u); }],
       }
     };
     function updateLastLabels(u) {
       for (const label of labels) {
+        if (label.key && !rollSeriesVisibility()[label.key]) { label.el.hidden = true; continue; }
         const data = rollChartData[label.series];
         if (!data?.length) { label.el.hidden = true; continue; }
         let lastVal = null;
@@ -2340,9 +3227,9 @@ function App() {
           const iv = rollChartData[3]?.[idx];
           if (!Number.isFinite(time)) { tooltip.hidden = true; return; }
           const parts = [`<span class="roll-tip-time">${formatIstTime(time)}</span>`];
-          if (Number.isFinite(bid)) parts.push(`<span style="color:#21d19f">Bid: ${rupee.format(bid)}</span>`);
-          if (Number.isFinite(ask)) parts.push(`<span style="color:#ffb15c">Ask: ${rupee.format(ask)}</span>`);
-          if (Number.isFinite(iv)) parts.push(`<span style="color:#a78bfa">IV: ${iv.toFixed(2)}%</span>`);
+          if (rollSeriesVisibility().bid && Number.isFinite(bid)) parts.push(`<span style="color:#21d19f">Bid: ${rupee.format(bid)}</span>`);
+          if (rollSeriesVisibility().ask && Number.isFinite(ask)) parts.push(`<span style="color:#ffb15c">Ask: ${rupee.format(ask)}</span>`);
+          if (rollSeriesVisibility().iv && Number.isFinite(iv)) parts.push(`<span style="color:#a78bfa">IV: ${iv.toFixed(2)}%</span>`);
           tooltip.innerHTML = parts.join("");
           tooltip.hidden = false;
           const left = Math.min(u.over.clientWidth - tooltip.offsetWidth - 12, Math.max(8, u.cursor.left + 14));
@@ -2536,35 +3423,49 @@ function App() {
     if (rollExchange() === "MCX" && !spotSym.startsWith("FUT_")) {
       throw new Error(`MCX future symbol not found for ${sym}. Refdata did not expose a FUT_* symbol for expiry ${rollExpiry() || "auto"}.`);
     }
-    const spotData = await nubraFetch("charts/timeseries", {
-      method: "POST",
-      body: JSON.stringify({
-        query: [{
+    let resolvedInterval = ROLLING_INTERVALS[0];
+    let spotPoints = [];
+    let spotError = null;
+    for (const intervalValue of ROLLING_INTERVALS) {
+      try {
+        const { data: spotData } = await fetchTimeseriesWithIntervals({
           exchange: rollExchange(),
           type: spotType,
           values: [spotSym],
           fields: ["close"],
           startDate: start,
           endDate: end,
-          interval: "1s",
           intraDay: false,
           realTime: false
-        }]
-      })
-    });
-    const spotSymbolData = extractSymbolData(spotData, spotSym);
-    const spotPoints = (Array.isArray(spotSymbolData?.close) ? spotSymbolData.close : [])
-      .map((p) => ({ ts: pointMs(p), spot: pointNumber(p, true) }))
-      .filter((p) => Number.isFinite(p.ts) && p.spot > 0)
-      .sort((a, b) => a.ts - b.ts);
-    if (!spotPoints.length) throw new Error(`No 1-second spot data returned for ${rollExchange()} ${spotType} ${spotSym}.`);
+        }, [intervalValue]);
+        const spotSymbolData = extractSymbolData(spotData, spotSym);
+        spotPoints = (Array.isArray(spotSymbolData?.close) ? spotSymbolData.close : [])
+          .map((p) => ({ ts: pointMs(p), spot: pointNumber(p, true) }))
+          .filter((p) => Number.isFinite(p.ts) && p.spot > 0)
+          .sort((a, b) => a.ts - b.ts);
+        if (spotPoints.length) {
+          resolvedInterval = intervalValue;
+          break;
+        }
+      } catch (error) {
+        spotError = error;
+      }
+    }
+    if (!spotPoints.length) {
+      throw new Error(spotError?.message || `No spot data returned for ${rollExchange()} ${spotType} ${spotSym}.`);
+    }
 
     setRollStatus("Refdata");
     let rows = await rollingOptionRows();
-    if (!rollExpiry()) {
-      const expiries = [...new Set(rows.map((row) => row.expiry))].sort();
+    let expiries = [...new Set(rows.map((row) => row.expiry))].sort();
+    if (!expiries.length) throw new Error(`No option expiries found for ${rollExchange()} ${sym}.`);
+    if (!rollExpiry() || !expiries.includes(rollExpiry())) {
       setRollExpiries(expiries);
       setRollExpiry(expiries[0] || "");
+      rows = await rollingOptionRows();
+      expiries = [...new Set(rows.map((row) => row.expiry))].sort();
+    } else {
+      setRollExpiries(expiries);
     }
     rows = rows.filter((row) => row.expiry === rollExpiry());
     if (!rows.length) throw new Error("No option rows found for selected expiry.");
@@ -2606,7 +3507,40 @@ function App() {
     }
     if (!optionNames.length) throw new Error("No CE/PE symbols found around ATM +/-2.");
 
-    const seriesByName = await fetchRollingSeries([...new Set(optionNames)], start, end, aliasToCanonical);
+    const latestSpot = spotPoints[spotPoints.length - 1]?.spot;
+    rollLiveContext = {
+      strikes,
+      step,
+      rowByKey,
+      optionByRef: new Map(),
+      orderbookByRef: new Map(),
+      greeksByRef: new Map(),
+      refIds: [...liveRefIds],
+      spotSymbol: spotSym,
+      spot: latestSpot,
+      points: 0,
+      lastValues: {
+        bid: NaN,
+        ask: NaN,
+        iv: NaN
+      },
+      frames: {
+        bid: null,
+        ask: null,
+        iv: null,
+        live: null
+      }
+    };
+    if (!rollLiveSocket) startRollLive();
+
+    let seriesByName = await fetchRollingSeries([...new Set(optionNames)], start, end, aliasToCanonical, resolvedInterval);
+    if (!seriesByName.size && resolvedInterval !== "1m") {
+      const fallbackSeries = await fetchRollingSeries([...new Set(optionNames)], start, end, aliasToCanonical, "1m");
+      if (fallbackSeries.size) {
+        seriesByName = fallbackSeries;
+        resolvedInterval = "1m";
+      }
+    }
     if (!seriesByName.size) {
       throw new Error(`No option chart series returned for ${rollExchange()} ${sym} ${rollExpiry()} using refdata symbols.`);
     }
@@ -2655,29 +3589,20 @@ function App() {
 
     const last = selected[selected.length - 1];
     const lastIv = ivLine.length ? ivLine[ivLine.length - 1].value : null;
-    rollLiveContext = {
-      strikes,
-      step,
-      rowByKey,
-      optionByRef: new Map(),
-      orderbookByRef: new Map(),
-      greeksByRef: new Map(),
-      refIds: [...liveRefIds],
-      spotSymbol: spotSym,
-      spot: last.spot,
-      points: selected.length,
-      lastValues: {
+    if (rollLiveContext) {
+      rollLiveContext.strikes = strikes;
+      rollLiveContext.step = step;
+      rollLiveContext.rowByKey = rowByKey;
+      rollLiveContext.refIds = [...liveRefIds];
+      rollLiveContext.spotSymbol = spotSym;
+      rollLiveContext.spot = last.spot;
+      rollLiveContext.points = selected.length;
+      rollLiveContext.lastValues = {
         bid: last.bid,
         ask: last.ask,
         iv: lastIv
-      },
-      frames: {
-        bid: null,
-        ask: null,
-        iv: null,
-        live: null
-      }
-    };
+      };
+    }
     setRollStats({
       spot: rupee.format(last.spot),
       strike: number.format(last.strike),
@@ -2685,10 +3610,11 @@ function App() {
       ask: rupee.format(last.ask),
       iv: lastIv != null ? `${lastIv.toFixed(1)}%` : "--",
       points: String(selected.length),
-      meta: `${sym} ${rollExpiry()} | 1-second quotes | ${requiredStrikes.size} strikes checked | ${rollExchange()}`
+      meta: `${sym} ${rollExpiry()} | ${resolvedInterval} quotes | ${requiredStrikes.size} strikes checked | ${rollExchange()}`
     });
     setRollExportData(selected);
     setRollStatus("Ready");
+    if (!rollLiveSocket) startRollLive();
   }
 
   function downloadCSV() {
@@ -2880,8 +3806,21 @@ function App() {
   onMount(() => {
     initPriceChart();
     initRollChart();
+    untrack(() => loadIndexMaster().catch(() => {}));
+    const closeChainSearch = (event) => {
+      if (chainSearchHost && !chainSearchHost.contains(event.target)) setChainSearchOpen(false);
+      if (chainExpiryMenuHost && !chainExpiryMenuHost.contains(event.target)) setChainExpiryMenuOpen(false);
+    };
+    document.addEventListener("mousedown", closeChainSearch);
     window.addEventListener("resize", resizeVisibleCharts);
+    const removeWidgetStateListener = widgetMode
+      ? desktopApi?.onWidgetMaximizedChanged?.(setWidgetMaximized)
+      : null;
     queueChartResize();
+    onCleanup(() => {
+      document.removeEventListener("mousedown", closeChainSearch);
+      removeWidgetStateListener?.();
+    });
   });
 
   createEffect(() => {
@@ -2898,9 +3837,8 @@ function App() {
     token();
     deviceId();
     environment();
-    untrack(() => loadMarketStrip());
-    const timer = window.setInterval(() => untrack(() => loadMarketStrip()), 30000);
-    onCleanup(() => window.clearInterval(timer));
+    untrack(() => loadMarketStrip().finally(startMarketStripLive));
+    onCleanup(stopMarketStripLive);
   });
 
   createEffect(() => {
@@ -2918,7 +3856,15 @@ function App() {
   });
 
   createEffect(() => {
-    if (!authed()) return;
+    if (!authed() || section() !== "chain" || instrumentSwitching()) return;
+    const query = chainSearchText().trim().toUpperCase();
+    if (query.length >= 2 && !chainSearchRows().length) {
+      untrack(() => loadChainSearchRows().catch((error) => setScriptStatus(error.message || "Search scripts unavailable")));
+    }
+  });
+
+  createEffect(() => {
+    if (!authed() || section() !== "rolling" || instrumentSwitching()) return;
     if (importMode()) return; // don't auto-fetch when showing imported data
     const loadKey = [
       token().trim(),
@@ -2936,7 +3882,7 @@ function App() {
   });
 
   createEffect(() => {
-    if (!authed() || section() !== "chain") return;
+    if (!authed() || section() !== "chain" || instrumentSwitching()) return;
     const loadKey = [
       token().trim(),
       deviceId().trim(),
@@ -2949,6 +3895,24 @@ function App() {
     untrack(() => run(loadOptionChain));
   });
 
+  createEffect(() => {
+    if (!authed() || section() !== "chain" || instrumentSwitching()) return;
+    if (!chainDerivedStats().atmIv) return;
+    const expiry = String(chainData()?.expiry || chainExpiry() || "");
+    if (!expiry) return;
+    const key = [chainExchange(), chainSymbol().trim().toUpperCase(), expiry].join("|");
+    if (chainIvChange().key === key) return;
+    setChainIvChange({ key, value: null, baseIv: null });
+    untrack(async () => {
+      try {
+        const baseIv = await fetchChainIvBaseline();
+        setChainIvChange((current) => current.key === key ? { key, value: null, baseIv } : current);
+      } catch {
+        setChainIvChange((current) => current.key === key ? { key, value: null, baseIv: null } : current);
+      }
+    });
+  });
+
   const navButtonStyle = (name) => section() === name
     ? "border-color:rgba(5,184,120,.42);background:rgba(5,184,120,.12);color:#ffffff"
     : "";
@@ -2957,13 +3921,22 @@ function App() {
     <div class={`app-root ${widgetMode ? "desktop-widget-mode" : ""}`} style="background:var(--bg-main);color:var(--text-primary)">
       <Show when={widgetMode}>
         <div class="widget-titlebar">
-          <div class="widget-drag-zone">
+          <div class="widget-drag-zone" onDblClick={async () => setWidgetMaximized(await desktopApi?.toggleMaximizeWidget?.())}>
             <strong>Option Chain Widget</strong>
             <span>{chainSymbol()} · {chainExchange()} · {chainExpiry() || "Auto"}</span>
           </div>
           <button class="widget-title-button" onClick={() => setDrawerOpen(true)}>Session</button>
           <button class="widget-title-button" onClick={() => desktopApi?.openMain?.()}>Main App</button>
-          <button class="widget-title-button close" onClick={() => desktopApi?.closeWidget?.()}>Close</button>
+          <div class="widget-window-controls">
+            <button class="widget-window-button minimize" aria-label="Minimize" title="Minimize" onClick={() => desktopApi?.minimizeWidget?.()}>−</button>
+            <button
+              class="widget-window-button maximize"
+              aria-label={widgetMaximized() ? "Restore" : "Maximize"}
+              title={widgetMaximized() ? "Restore" : "Maximize"}
+              onClick={async () => setWidgetMaximized(await desktopApi?.toggleMaximizeWidget?.())}
+            >{widgetMaximized() ? "❐" : "□"}</button>
+            <button class="widget-window-button close" aria-label="Close" title="Close" onClick={() => desktopApi?.closeWidget?.()}>×</button>
+          </div>
         </div>
       </Show>
 
@@ -3026,6 +3999,13 @@ function App() {
         </nav>
 
         <div class="flex items-center gap-2.5">
+          <button
+            class="main-help-button"
+            type="button"
+            aria-label="Open app and chart guide"
+            title="App and chart guide"
+            onClick={() => setMainHelpOpen(true)}
+          >i</button>
           <Show when={desktopApi?.openWidget}>
             <button class="terminal-button" onClick={() => desktopApi.openWidget()}>
               Widget
@@ -3040,6 +4020,47 @@ function App() {
           </div>
         </div>
       </header>
+      </Show>
+
+      <Show when={!widgetMode && mainHelpOpen()}>
+        <div class="main-help-backdrop" onClick={() => setMainHelpOpen(false)}>
+          <section class="main-help-panel" role="dialog" aria-modal="true" aria-labelledby="main-help-title" onClick={(event) => event.stopPropagation()}>
+            <div class="main-help-header">
+              <div>
+                <span class="main-help-kicker">Quick guide</span>
+                <h2 id="main-help-title">Using Options Intelligence</h2>
+              </div>
+              <button type="button" aria-label="Close guide" title="Close" onClick={() => setMainHelpOpen(false)}>×</button>
+            </div>
+            <div class="main-help-grid">
+              <article>
+                <b>1</b>
+                <div><h3>Connect your session</h3><p>Open Session, enter your Nubra credentials, and confirm the header shows Connected.</p></div>
+              </article>
+              <article>
+                <b>2</b>
+                <div><h3>Load an underlying</h3><p>Click the symbol box, choose an exchange and instrument, select an expiry and time range, then use Plot or Load.</p></div>
+              </article>
+              <article>
+                <b>3</b>
+                <div><h3>Read and move the chart</h3><p>Hover an axis for its value. Drag inside the chart to pan. Drag an axis to expand or squeeze its scale, use the wheel to zoom, and double-click an axis to reset.</p></div>
+              </article>
+              <article>
+                <b>4</b>
+                <div><h3>Use the analysis tools</h3><p>Switch time windows, compare Bid, Ask and IV, draw reference lines, start live updates, or export loaded data as CSV or Parquet.</p></div>
+              </article>
+              <article>
+                <b>5</b>
+                <div><h3>Explore Option Chain</h3><p>Review CE/PE prices, Greeks, OI, volume, PCR and ATM IV. Use ATM distance or premium filters to focus the table.</p></div>
+              </article>
+              <article>
+                <b>6</b>
+                <div><h3>Open the desktop widget</h3><p>Use Widget for an always-on-top option chain. Drag its title bar, resize from its edges, or use its window controls.</p></div>
+              </article>
+            </div>
+            <p class="main-help-footer">Axis onboarding appears three times, then stays out of your way. This guide is always available from the <strong>i</strong> button.</p>
+          </section>
+        </div>
       </Show>
 
       <Show when={drawerOpen()}>
@@ -3124,7 +4145,20 @@ function App() {
 
         <Show when={!widgetMode}>
           <div class="unified-toolbar">
-            <button class="symbol-trigger" onClick={() => setSymbolSearchOpen(true)} disabled={!authed()}>
+            <button class="symbol-trigger" onClick={() => {
+              setSymbolSearchOpen(true);
+              if (authed()) {
+                if (!(scriptCache().rows || []).length) {
+                  loadCachedScripts(scriptExchange(), false).catch((error) => setScriptStatus(error.message || "Script download failed"));
+                }
+                if (!chainSearchRows().length) {
+                  loadChainSearchRows().catch((error) => setScriptStatus(error.message || "Instrument masters unavailable"));
+                }
+                if (!indexMasterRows().length) {
+                  loadIndexMaster().catch(() => {});
+                }
+              }
+            }} disabled={!authed()}>
               <span class="symbol-trigger-main">{scriptUnderlying() || rollSymbol() || chainSymbol() || symbol()}</span>
               <span class="symbol-trigger-meta">{scriptExchange()} · {section() === "market" ? instrumentType() : rollType()} · {rollExpiry() || chainExpiry() || "Auto expiry"}</span>
             </button>
@@ -3155,6 +4189,37 @@ function App() {
             <button class="toolbar-icon-button" title="Refresh symbols" onClick={() => run(() => loadCachedScripts(scriptExchange(), true))} disabled={busy() || !authed()}>
               Refresh
             </button>
+            <Show when={section() === "rolling"}>
+              <div class="toolbar-group toolbar-data-group" aria-label="Rolling Straddle data controls">
+                <button class="toolbar-compact-button" onClick={() => run(loadRollingExpiries)} disabled={busy()}>Expiries</button>
+                <button class="toolbar-compact-button primary" onClick={() => { setImportMode(false); autoRollLoadedKey = ""; run(loadRollingStraddle); }} disabled={busy()}>Plot</button>
+                <Show
+                  when={rollLive()}
+                  fallback={<button class="toolbar-compact-button" onClick={startRollLive} disabled={busy() || !authed()}>Live</button>}
+                >
+                  <button class="toolbar-compact-button live" onClick={stopRollLive}>Stop</button>
+                </Show>
+                <label class="toolbar-compact-button file" title="Import CSV or Parquet file">
+                  Import
+                  <input type="file" accept=".csv,.parquet" class="sr-only" onChange={handleImport} />
+                </label>
+                <Show when={rollExportData().length > 0}>
+                  <button class="toolbar-compact-button" onClick={downloadCSV} title={`Download ${rollExportData().length.toLocaleString()} rows as CSV`}>CSV</button>
+                  <button class="toolbar-compact-button" onClick={downloadParquet} title={`Download ${rollExportData().length.toLocaleString()} rows as Parquet`}>Parquet</button>
+                </Show>
+              </div>
+              <div class="toolbar-group toolbar-draw-group" aria-label="Reference line controls">
+                <span class="toolbar-group-label">Draw</span>
+                <input class="toolbar-draw-name" value={rollLineName()} onInput={(e) => setRollLineName(e.currentTarget.value)} placeholder="Line name" aria-label="Line name" />
+                <input class="toolbar-draw-value" value={rollLineValue()} onInput={(e) => setRollLineValue(e.currentTarget.value)} placeholder="Value" inputmode="decimal" aria-label="Line value" />
+                <select class="toolbar-draw-target" value={rollLineTarget()} onInput={(e) => setRollLineTarget(e.currentTarget.value)} aria-label="Line target">
+                  <option value="bid">Bid</option>
+                  <option value="ask">Ask</option>
+                  <option value="iv">IV</option>
+                </select>
+                <button class="toolbar-compact-button" onClick={addRollLine}>Add line</button>
+              </div>
+            </Show>
           </div>
         </Show>
 
@@ -3163,18 +4228,22 @@ function App() {
             <section class="symbol-modal" onClick={(event) => event.stopPropagation()}>
               <div class="symbol-modal-header">
                 <h2>Symbol Search</h2>
-                <button class="symbol-close" onClick={() => setSymbolSearchOpen(false)}>×</button>
+                <button class="symbol-close" onClick={() => setSymbolSearchOpen(false)}>x</button>
               </div>
               <div class="symbol-search-input-wrap">
-                <span class="symbol-search-icon">⌕</span>
+                <span class="symbol-search-icon">Search</span>
                 <input
                   class="symbol-search-input"
                   value={symbolSearchText()}
                   placeholder="Search NIFTY, BANKNIFTY, CRUDEOIL, RELIANCE..."
-                  onInput={(e) => setSymbolSearchText(e.currentTarget.value)}
+                  onInput={(e) => {
+                    const value = e.currentTarget.value;
+                    setSymbolSearchText(value);
+                    if (value.trim()) setSymbolSearchCategory("all");
+                  }}
                   autofocus
                 />
-                <button class="symbol-clear" onClick={() => setSymbolSearchText("")}>×</button>
+                <button class="symbol-clear" onClick={() => setSymbolSearchText("")}>x</button>
               </div>
               <div class="symbol-category-tabs">
                 <For each={SYMBOL_CATEGORIES}>
@@ -3186,7 +4255,15 @@ function App() {
                 </For>
               </div>
               <div class="symbol-result-list">
-                <For each={symbolSearchResults()} fallback={<div class="symbol-empty">No {symbolSearchCategory() === "all" ? "" : SYMBOL_CATEGORIES.find((item) => item.key === symbolSearchCategory())?.label.toLowerCase()} symbols for {scriptExchange()}</div>}>
+                <For each={symbolSearchResults()} fallback={
+                  <div class="symbol-empty symbol-load-empty">
+                    <span>{scriptStatus()}</span>
+                    <small>No matching {symbolSearchCategory() === "all" ? "" : SYMBOL_CATEGORIES.find((item) => item.key === symbolSearchCategory())?.label.toLowerCase()} symbols for {scriptExchange()}</small>
+                    <button class="terminal-button-secondary" onClick={() => run(() => loadCachedScripts(scriptExchange(), true))} disabled={busy()}>
+                      {busy() ? "Loading scripts…" : "Retry scripts"}
+                    </button>
+                  </div>
+                }>
                   {(item) => (
                     <button
                       class="symbol-result-row"
@@ -3209,9 +4286,9 @@ function App() {
           </div>
         </Show>
 
-        <Show when={section() === "rolling"}>
+        <section class={`view-panel ${section() === "rolling" ? "active" : ""}`} aria-hidden={section() !== "rolling"}>
           {/* ── Toolbar ── */}
-          <div class="control-panel">
+          <div class="control-panel rolling-legacy-toolbar">
             <label class="terminal-label">
               Underlying
               <input class="terminal-input w-24" value={rollSymbol()} onInput={(e) => setRollSymbol(e.currentTarget.value.toUpperCase())} />
@@ -3299,7 +4376,7 @@ function App() {
           </div>
 
           {/* ── Chart workspace ── */}
-          <div class="control-panel line-tool-panel">
+          <div class="control-panel line-tool-panel rolling-legacy-toolbar">
             <label class="terminal-label">
               Line Name
               <input class="terminal-input w-36" value={rollLineName()} onInput={(e) => setRollLineName(e.currentTarget.value)} placeholder="Support" />
@@ -3382,68 +4459,199 @@ function App() {
                     <button class={rollWindowMode() === "1h" ? "active" : ""} onClick={() => setRollChartWindowMode("1h")}>1H</button>
                     <button class={rollWindowMode() === "30m" ? "active" : ""} onClick={() => setRollChartWindowMode("30m")}>30M</button>
                   </div>
-                  <span class="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    class={`chart-series-toggle ${rollSeriesVisibility().bid ? "" : "muted"}`}
+                    aria-pressed={rollSeriesVisibility().bid}
+                    title={rollSeriesVisibility().bid ? "Mute Bid series" : "Show Bid series"}
+                    onClick={() => toggleRollSeries("bid", 1)}
+                  >
                     <span class="inline-block h-2 w-4 rounded-sm" style="background:#21d19f"></span>
                     <span style="color:var(--text-muted)">Bid ₹</span>
-                  </span>
-                  <span class="flex items-center gap-1.5">
+                  </button>
+                  <button
+                    type="button"
+                    class={`chart-series-toggle ${rollSeriesVisibility().ask ? "" : "muted"}`}
+                    aria-pressed={rollSeriesVisibility().ask}
+                    title={rollSeriesVisibility().ask ? "Mute Ask series" : "Show Ask series"}
+                    onClick={() => toggleRollSeries("ask", 2)}
+                  >
                     <span class="inline-block h-2 w-4 rounded-sm" style="background:#ffb15c"></span>
                     <span style="color:var(--text-muted)">Ask ₹</span>
-                  </span>
-                  <span class="flex items-center gap-1.5">
+                  </button>
+                  <button
+                    type="button"
+                    class={`chart-series-toggle ${rollSeriesVisibility().iv ? "" : "muted"}`}
+                    aria-pressed={rollSeriesVisibility().iv}
+                    title={rollSeriesVisibility().iv ? "Mute IV series" : "Show IV series"}
+                    onClick={() => toggleRollSeries("iv", 3)}
+                  >
                     <span class="inline-block h-px w-4" style="background:#a78bfa;border-top:2px dashed #a78bfa"></span>
                     <span style="color:var(--text-muted)">IV % (left)</span>
-                  </span>
+                  </button>
                 </div>
               </div>
               <div class="chart-card-body" ref={(el) => { rollChartHost = el; initRollChart(); queueChartResize(); }}></div>
             </div>
           </div>
-        </Show>
+        </section>
 
         <Show when={section() === "chain"}>
-          <div class="chain-market-strip">
-            <Metric label="Spot" value={formatMoney(chainData()?.cp)} />
-            <Metric label="ATM Strike" value={formatStrike(chainData()?.atm)} />
-            <Metric label="Expiry" value={chainData()?.expiry || chainExpiry() || "Auto"} />
-            <Metric label="Strikes" value={String(optionRows().length)} />
-            <Metric label="Status" value={chainStatus()} />
-          </div>
-
           <div class="option-chain-workspace">
-            <aside class="chain-sidebar">
-              <div class="chain-kicker">Option Chain</div>
-              <h2 class="chain-title">{chainData()?.asset || chainSymbol()}</h2>
-              <div class="chain-subtitle">{chainExchange()} · {chainData()?.expiry || chainExpiry() || "Auto"}</div>
-
-              <div class="chain-stat-grid">
-                <div class="chain-stat">
-                  <span>Spot</span>
-                  <strong>{formatMoney(chainData()?.cp)}</strong>
-                </div>
-                <div class="chain-stat">
-                  <span>ATM</span>
-                  <strong>{formatStrike(chainData()?.atm)}</strong>
-                </div>
-                <div class="chain-stat">
-                  <span>Strikes</span>
-                  <strong>{optionRows().length}</strong>
-                </div>
-                <div class="chain-stat">
-                  <span>Status</span>
-                  <strong>{chainStatus()}</strong>
-                </div>
+            <div class="chain-screen-header">
+              <h2>Option Chain</h2>
+              <button
+                class="chain-search-box"
+                type="button"
+                onClick={() => {
+                  setChainSearchOpen(true);
+                  if (authed() && !chainSearchRows().length) {
+                    loadChainSearchRows().catch((error) => setScriptStatus(error.message || "Search scripts unavailable"));
+                  }
+                }}
+              >
+                <span>Search</span>
+                <span class="chain-search-placeholder">{chainSearchText() || "Search Option Chain"}</span>
+              </button>
+              <div class="chain-expiry-select" ref={(el) => { chainExpiryMenuHost = el; }}>
+                <span>Expiry:</span>
+                <button
+                  class="chain-expiry-trigger"
+                  type="button"
+                  aria-haspopup="listbox"
+                  aria-expanded={chainExpiryMenuOpen()}
+                  onClick={() => setChainExpiryMenuOpen((open) => !open)}
+                >
+                  <span>{chainExpiry() || "Auto"}</span>
+                  <span class="chain-expiry-caret">v</span>
+                </button>
+                <Show when={chainExpiryMenuOpen()}>
+                  <div class="chain-expiry-menu" role="listbox">
+                    <button
+                      class={chainExpiry() ? "chain-expiry-option" : "chain-expiry-option active"}
+                      type="button"
+                      role="option"
+                      aria-selected={!chainExpiry()}
+                      onClick={() => selectChainExpiry("")}
+                    >
+                      Auto
+                    </button>
+                    <For each={chainExpiries()}>
+                      {(expiry) => (
+                        <button
+                          class={chainExpiry() === expiry ? "chain-expiry-option active" : "chain-expiry-option"}
+                          type="button"
+                          role="option"
+                          aria-selected={chainExpiry() === expiry}
+                          onClick={() => selectChainExpiry(expiry)}
+                        >
+                          {expiry}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </Show>
               </div>
-            </aside>
+              <button class="chain-header-icon" title="Reload" onClick={() => { autoChainLoadedKey = ""; run(loadOptionChain); }} disabled={busy()}>↻</button>
+              <button class="chain-header-icon" title="Columns" onClick={() => setChainColumnMenuOpen((open) => !open)}>⚙</button>
+              <Show when={chainColumnMenuOpen()}>
+                <div class="chain-column-popover chain-header-popover">
+                  <button class="chain-column-all" onClick={showAllChainColumns}>All columns</button>
+                  <For each={CHAIN_COLUMNS}>
+                    {(column) => (
+                      <label class="chain-check-row">
+                        <input
+                          type="checkbox"
+                          checked={chainVisibleColumns()[column.key]}
+                          onInput={() => toggleChainColumn(column.key)}
+                        />
+                        <span>{column.label}</span>
+                      </label>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
+
+            <Show when={chainSearchOpen()}>
+              <div class="symbol-modal-backdrop" onClick={() => setChainSearchOpen(false)}>
+                <section class="symbol-modal chain-search-modal" onClick={(event) => event.stopPropagation()}>
+                  <div class="symbol-modal-header">
+                    <h2>Option Chain Search</h2>
+                    <button class="symbol-close" onClick={() => setChainSearchOpen(false)}>x</button>
+                  </div>
+                  <div class="symbol-search-input-wrap">
+                    <span class="symbol-search-icon">Search</span>
+                    <input
+                      class="symbol-search-input"
+                      value={chainSearchText()}
+                      placeholder="Search index, cash, futures, options, commodity..."
+                      onInput={(e) => setChainSearchText(e.currentTarget.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          const first = chainScriptMatches()[0];
+                          if (first) run(() => chooseChainScript(first));
+                        }
+                        if (e.key === "Escape") setChainSearchOpen(false);
+                      }}
+                      autofocus
+                    />
+                    <button class="symbol-clear" onClick={() => setChainSearchText("")}>x</button>
+                  </div>
+                  <div class="symbol-category-tabs">
+                    <For each={SYMBOL_CATEGORIES}>
+                      {(category) => (
+                        <button class={chainSearchCategory() === category.key ? "active" : ""} onClick={() => setChainSearchCategory(category.key)}>
+                          {category.key === "stock" ? "Cash" : category.label}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <div class="symbol-result-list chain-modal-result-list">
+                    <For each={groupedChainScriptMatches()} fallback={<div class="symbol-empty">No matching instruments</div>}>
+                      {(group) => (
+                        <div class="chain-modal-group">
+                          <div class="chain-script-group-title">{group.label}</div>
+                          <For each={group.items}>
+                            {(item) => (
+                              <button
+                                type="button"
+                                class="chain-modal-result-row"
+                                onClick={() => run(() => chooseChainScript(item))}
+                              >
+                                <span class={`chain-script-tag ${item.exchange.toLowerCase()}`}>{item.exchange}</span>
+                                <span class="chain-modal-code">{item.asset}</span>
+                                <span class="chain-modal-name">{item.displayName || item.asset}</span>
+                                <span class="chain-script-tag">{item.typesText}</span>
+                                <Show when={item.expiryText} fallback={<span class="chain-script-expiry-spacer"></span>}>
+                                  <span class="chain-script-expiry">Exp {item.expiryText}</span>
+                                </Show>
+                              </button>
+                            )}
+                          </For>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </section>
+              </div>
+            </Show>
 
             <section class="chain-table-card">
               <div class="chain-table-header">
                 <div>
-                  <div class="flex items-center gap-2">
-                    <h2>Options Chain</h2>
-                    <span class="chain-ready">{chainStatus()}</span>
+                  <div class="chain-underlying-line">
+                    <span>{chainData()?.asset || chainSymbol()} {chainExchange() === "NSE" ? "IDX" : chainExchange()}</span>
+                    <strong>{formatIndexValue(chainData()?.cp)}</strong>
+                    <em>{chainStatus()}</em>
                   </div>
-                  <p>{chainData()?.asset || chainSymbol()} · {chainExchange()} · {chainData()?.expiry || chainExpiry() || "Auto"} · prices in rupees</p>
+                  <div class="chain-metric-row">
+                    <Metric label="ATM IV" value={chainDerivedStats().atmIv != null ? formatPlain(chainDerivedStats().atmIv, 2) : "--"} />
+                    <Metric label="IV Change %" value={chainIvChangePercent() != null ? formatPercent(chainIvChangePercent()) : "--"} />
+                    <Metric label="PCR" value={chainDerivedStats().pcr != null ? formatPlain(chainDerivedStats().pcr, 2) : "--"} />
+                    <Metric label="Market Lot" value={chainRefMetrics().marketLot != null ? String(chainRefMetrics().marketLot) : "--"} />
+                    <Metric label="Days for Expiry" value={chainRefMetrics().daysForExpiry != null ? String(chainRefMetrics().daysForExpiry) : "--"} />
+                  </div>
                 </div>
                 <div class="chain-actions">
                   <label class="chain-inline-field">
@@ -3489,26 +4697,6 @@ function App() {
                   >
                     <button class="terminal-button-secondary" onClick={stopChainLive}>Stop Live</button>
                   </Show>
-                  <div class="chain-column-menu">
-                    <button class="chain-icon-button" title="Choose columns" onClick={() => setChainColumnMenuOpen((open) => !open)}>Columns</button>
-                    <Show when={chainColumnMenuOpen()}>
-                      <div class="chain-column-popover">
-                        <button class="chain-column-all" onClick={showAllChainColumns}>All columns</button>
-                        <For each={CHAIN_COLUMNS}>
-                          {(column) => (
-                            <label class="chain-check-row">
-                              <input
-                                type="checkbox"
-                                checked={chainVisibleColumns()[column.key]}
-                                onInput={() => toggleChainColumn(column.key)}
-                              />
-                              <span>{column.label}</span>
-                            </label>
-                          )}
-                        </For>
-                      </div>
-                    </Show>
-                  </div>
                   <label class="chain-inline-field">
                     Filter
                     <select class="terminal-input" value={chainFilterMode()} onInput={(e) => setChainFilterMode(e.currentTarget.value)}>
@@ -3517,9 +4705,20 @@ function App() {
                     </select>
                   </label>
                   <Show when={chainFilterMode() === "atm"}>
-                    <label class="chain-inline-field chain-range-field">
-                      ATM Distance
-                      <input class="chain-filter" value={chainAtmRange()} placeholder="+/-800 / +2" onInput={(e) => setChainAtmRange(e.currentTarget.value)} />
+                    <label class="chain-inline-field chain-atm-range-field">
+                      ATM Range
+                      <select
+                        class="terminal-input"
+                        title="Visible strikes around ATM"
+                        value={chainAtmRange()}
+                        onInput={(e) => setChainAtmRange(e.currentTarget.value)}
+                      >
+                        <option value="10">±10 strikes</option>
+                        <option value="20">±20 strikes</option>
+                        <option value="30">±30 strikes</option>
+                        <option value="40">±40 strikes</option>
+                        <option value="full">Full chain</option>
+                      </select>
                     </label>
                   </Show>
                   <Show when={chainFilterMode() === "premium"}>
@@ -3543,18 +4742,21 @@ function App() {
                 >
                   <table class="chain-table">
                     <thead>
-                      <tr class="chain-group-row">
-                        <th colSpan={visibleColumnCount()}>Calls</th>
-                        <th class="strike-head">Strike Price</th>
-                        <th colSpan={visibleColumnCount()}>Puts</th>
-                      </tr>
                       <tr>
                         <For each={visibleCallColumns()}>
-                          {(key) => <th class={key === "iv" ? "chain-head-iv" : key === "ltp" ? "chain-head-ltp" : ""}>{chainColumnLabel(key)}</th>}
+                          {(key) => <th class={key === "iv" ? "chain-head-iv" : key === "ltp" ? "chain-head-ltp" : key === "oi_change" ? "chain-head-oi-change" : ""}>
+                            <Show when={key === "ltp"} fallback={chainColumnLabel(key)}>
+                              <span>{chainColumnLabel(key)}</span><b class="chain-side-badge">CE</b>
+                            </Show>
+                          </th>}
                         </For>
                         <th class="strike-head">Strike Price</th>
                         <For each={visiblePutColumns()}>
-                          {(key) => <th class={key === "iv" ? "chain-head-iv" : key === "ltp" ? "chain-head-ltp" : ""}>{chainColumnLabel(key)}</th>}
+                          {(key) => <th class={key === "iv" ? "chain-head-iv" : key === "ltp" ? "chain-head-ltp" : key === "oi_change" ? "chain-head-oi-change" : ""}>
+                            <Show when={key === "ltp"} fallback={chainColumnLabel(key)}>
+                              <b class="chain-side-badge">PE</b><span>{chainColumnLabel(key)}</span>
+                            </Show>
+                          </th>}
                         </For>
                       </tr>
                     </thead>
@@ -3567,7 +4769,7 @@ function App() {
                                 const showSide = showPremiumSide(row.ce);
                                 const props = optionCellProps(showSide ? row.ce : null, key);
                                 const sideClass = index() === 0 ? "chain-side-call-start" : index() === visibleCallColumns().length - 1 ? "chain-side-call-end" : "";
-                                return <OptionCell {...props} tone={props.tone === "oi" ? "oi-call" : props.tone} class={[sideClass, showSide ? "" : "chain-cell-filtered"].filter(Boolean).join(" ")} />;
+                                return <OptionCell {...props} tone={props.tone === "oi" ? "oi-call" : props.tone} class={[sideClass, key === "oi" ? "chain-call-bar" : "", showSide ? "" : "chain-cell-filtered"].filter(Boolean).join(" ")} />;
                               }}
                             </For>
                             <td class="strike-cell">{formatStrike(row.strike)}</td>
@@ -3576,7 +4778,7 @@ function App() {
                                 const showSide = showPremiumSide(row.pe);
                                 const props = optionCellProps(showSide ? row.pe : null, key);
                                 const sideClass = index() === 0 ? "chain-side-put-start" : index() === visiblePutColumns().length - 1 ? "chain-side-put-end" : "";
-                                return <OptionCell {...props} tone={props.tone === "oi" ? "oi-put" : props.tone} class={[sideClass, showSide ? "" : "chain-cell-filtered"].filter(Boolean).join(" ")} />;
+                                return <OptionCell {...props} tone={props.tone === "oi" ? "oi-put" : props.tone} class={[sideClass, key === "oi" ? "chain-put-bar" : "", showSide ? "" : "chain-cell-filtered"].filter(Boolean).join(" ")} />;
                               }}
                             </For>
                           </tr>
@@ -3714,13 +4916,14 @@ function OptionCell(props) {
   const n = Number(props.value);
   const hasValue = Number.isFinite(n);
   const display = () => {
+    if (props.text != null) return props.text;
     if (!hasValue) return "--";
     if (props.money) return formatMoney(n);
     if (props.compact) return formatCompact(n);
     return `${formatPlain(n, props.digits ?? 2)}${props.suffix || ""}`;
   };
   const className = () => [props.class, props.tone ? `chain-cell-${props.tone}` : ""].filter(Boolean).join(" ");
-  return <td class={className()}>{display()}</td>;
+  return <td class={className()} style={props.style || ""}>{display()}</td>;
 }
 
 render(() => <App />, document.getElementById("root"));

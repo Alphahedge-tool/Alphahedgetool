@@ -370,7 +370,7 @@ function attachLiveWebSocket(server) {
 
   wss.on("connection", (ws) => {
     let bridge = null;
-    const sampleCounts = { option: 0, orderbook: 0, greeks: 0 };
+    const sampleCounts = { index: 0, option: 0, orderbook: 0, greeks: 0 };
     liveLog("client-connected");
 
     const send = (payload) => {
@@ -412,7 +412,8 @@ function attachLiveWebSocket(server) {
         exchange: input.exchange,
         interval: input.interval,
         expiry: input.expiry,
-        refIds: Array.isArray(input.refIds) ? input.refIds : []
+        refIds: Array.isArray(input.refIds) ? input.refIds : [],
+        indexSubscriptions: Array.isArray(input.indexSubscriptions) ? input.indexSubscriptions : []
       };
       liveLog("subscribe", {
         symbol: config.symbol,
@@ -420,6 +421,7 @@ function attachLiveWebSocket(server) {
         exchange: config.exchange,
         expiry: config.expiry,
         refIds: config.refIds.length,
+        indexSubscriptions: config.indexSubscriptions.reduce((count, item) => count + (Array.isArray(item?.symbols) ? item.symbols.length : 0), 0),
         hasToken: Boolean(config.token),
         hasDeviceId: Boolean(config.deviceId)
       });

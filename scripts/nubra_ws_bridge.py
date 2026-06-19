@@ -76,8 +76,9 @@ def main():
     interval = str(config.get("interval") or "1m").strip()
     expiry = str(config.get("expiry") or "").strip()
     ref_ids = [str(ref_id).strip() for ref_id in config.get("refIds") or [] if str(ref_id).strip()]
+    index_subscriptions = config.get("indexSubscriptions") or []
 
-    if not symbol:
+    if not symbol and not index_subscriptions:
         raise ValueError("symbol is required")
     if not config.get("token"):
         raise ValueError("token is required")
@@ -96,6 +97,9 @@ def main():
     def on_ohlcv_data(message):
         emit("ohlcv", data=to_json(message))
 
+    def on_index_data(message):
+        emit("index", data=to_json(message))
+
     def on_option_data(message):
         emit("option", data=to_json(message))
 
@@ -107,6 +111,7 @@ def main():
 
     socket = websocketdata.NubraDataSocket(
         client=client,
+        on_index_data=on_index_data,
         on_ohlcv_data=on_ohlcv_data,
         on_option_data=on_option_data,
         on_orderbook_data=on_orderbook_data,
@@ -116,7 +121,14 @@ def main():
         on_error=on_error,
     )
     socket.connect()
-    socket.subscribe([spot_symbol], data_type="ohlcv", interval=interval, exchange=exchange)
+    if index_subscriptions:
+        for subscription in index_subscriptions:
+            symbols = [str(value).strip() for value in subscription.get("symbols") or [] if str(value).strip()]
+            subscription_exchange = str(subscription.get("exchange") or "NSE").upper().strip()
+            if symbols:
+                socket.subscribe(symbols, data_type="index", exchange=subscription_exchange)
+    elif spot_symbol:
+        socket.subscribe([spot_symbol], data_type="ohlcv", interval=interval, exchange=exchange)
     if expiry:
         socket.subscribe([f"{symbol}:{expiry}"], data_type="option", exchange=exchange)
     if ref_ids:
@@ -131,6 +143,7 @@ def main():
         interval=interval,
         expiry=expiry,
         ref_ids=len(ref_ids),
+        index_subscriptions=sum(len(item.get("symbols") or []) for item in index_subscriptions),
     )
 
     try:
