@@ -25,6 +25,14 @@ function isMarketHours() {
   return (h < 15 || (h === 15 && m < 30));
 }
 
+function msUntilMarketClose() {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const close = new Date(ist);
+  close.setHours(15, 30, 0, 0);
+  return close.getTime() - ist.getTime();
+}
+
 const rupee = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -369,9 +377,12 @@ function App() {
   let rollLiveSocket = null;
   let rollLiveContext = null;
   let rollLiveFlushTimer = null;
+  let rollCutoffTimer = null;
   let chainLiveSocket = null;
+  let chainCutoffTimer = null;
   let marketStripSocket = null;
   let marketStripReconnectTimer = null;
+  let marketStripCutoffTimer = null;
 
   const [rollLive, setRollLive] = createSignal(false);
 
@@ -1580,6 +1591,7 @@ function App() {
   }
 
   function stopMarketStripLive() {
+    if (marketStripCutoffTimer) { clearTimeout(marketStripCutoffTimer); marketStripCutoffTimer = null; }
     if (marketStripReconnectTimer) {
       window.clearTimeout(marketStripReconnectTimer);
       marketStripReconnectTimer = null;
@@ -1593,6 +1605,8 @@ function App() {
     stopMarketStripLive();
     if (!authed()) return;
     if (!isMarketHours()) { setMarketStripStatus("Market closed (after 3:30 PM)"); return; }
+    const ms = msUntilMarketClose();
+    if (ms > 0) marketStripCutoffTimer = setTimeout(() => { stopMarketStripLive(); setMarketStripStatus("Market closed (after 3:30 PM)"); }, ms);
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${location.host}/ws/live`);
     marketStripSocket = socket;
@@ -2110,8 +2124,11 @@ function App() {
   }
 
   function startChainLive() {
+    if (chainCutoffTimer) { clearTimeout(chainCutoffTimer); chainCutoffTimer = null; }
     if (chainLiveSocket) { chainLiveSocket.close(); chainLiveSocket = null; }
     if (!isMarketHours()) { setChainStatus("Market closed (after 3:30 PM)"); return; }
+    const cutoffMs = msUntilMarketClose();
+    if (cutoffMs > 0) chainCutoffTimer = setTimeout(() => { stopChainLive(); setChainStatus("Market closed (after 3:30 PM)"); }, cutoffMs);
     const sym = chainSymbol().trim().toUpperCase();
     const expiry = chainData()?.expiry || chainExpiry();
     if (!sym) { setChainStatus("Symbol needed"); return; }
@@ -2155,6 +2172,7 @@ function App() {
   }
 
   function stopChainLive() {
+    if (chainCutoffTimer) { clearTimeout(chainCutoffTimer); chainCutoffTimer = null; }
     if (chainLiveSocket) {
       try { chainLiveSocket.send(JSON.stringify({ type: "stop" })); } catch {}
       chainLiveSocket.close();
@@ -2590,8 +2608,11 @@ function App() {
   }
 
   function startRollLive() {
+    if (rollCutoffTimer) { clearTimeout(rollCutoffTimer); rollCutoffTimer = null; }
     if (rollLiveSocket) { rollLiveSocket.close(); rollLiveSocket = null; }
     if (!isMarketHours()) { setRollStatus("Market closed (after 3:30 PM)"); return; }
+    const cutoffMs = msUntilMarketClose();
+    if (cutoffMs > 0) rollCutoffTimer = setTimeout(() => { stopRollLive(); setRollStatus("Market closed (after 3:30 PM)"); }, cutoffMs);
     const expiry = rollExpiry();
     if (!expiry) { setRollStatus("Select expiry first"); return; }
     if (!token().trim() || !deviceId().trim()) { setRollStatus("Session needed"); return; }
@@ -2637,6 +2658,7 @@ function App() {
   }
 
   function stopRollLive() {
+    if (rollCutoffTimer) { clearTimeout(rollCutoffTimer); rollCutoffTimer = null; }
     if (rollLiveFlushTimer) {
       clearTimeout(rollLiveFlushTimer);
       rollLiveFlushTimer = null;
