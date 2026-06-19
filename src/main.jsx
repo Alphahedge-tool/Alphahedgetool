@@ -1624,6 +1624,7 @@ function App() {
       setMarketStripStatus("Connecting live indices");
     };
     socket.onmessage = (event) => {
+      if (!isMarketHours()) { stopMarketStripLive(); setMarketStripStatus("Market closed (after 3:30 PM)"); return; }
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (message.event === "status" && (message.status === "connected" || message.status === "subscribed")) {
@@ -2154,6 +2155,7 @@ function App() {
       setChainStatus("Live subscribing");
     };
     ws.onmessage = (event) => {
+      if (!isMarketHours()) { stopChainLive(); setChainStatus("Market closed (after 3:30 PM)"); return; }
       let msg; try { msg = JSON.parse(event.data); } catch { return; }
       if (msg.event === "option" && msg.data) handleChainLiveTick(msg.data);
       if (msg.event === "status" && msg.status === "connected") setChainStatus("Live connected");
@@ -2449,7 +2451,7 @@ function App() {
     if (rollLiveContext.frames.live) cancelAnimationFrame(rollLiveContext.frames.live);
 
     const step = (now) => {
-      if (!rollLiveContext || !rollChart) return;
+      if (!rollLiveContext || !rollChart || !isMarketHours()) return;
       const progress = Math.min(1, (now - started) / duration);
       const eased = 1 - Math.pow(1 - progress, 3);
       const bid = start.bid + (target.bid - start.bid) * eased;
@@ -2562,9 +2564,11 @@ function App() {
   }
 
   function scheduleRollLiveUpdate(receivedAtMs) {
+    if (!isMarketHours()) { stopRollLive(); setRollStatus("Market closed (after 3:30 PM)"); return; }
     if (rollLiveFlushTimer) return;
     rollLiveFlushTimer = setTimeout(() => {
       rollLiveFlushTimer = null;
+      if (!isMarketHours()) { stopRollLive(); setRollStatus("Market closed (after 3:30 PM)"); return; }
       updateRollLiveSnapshot(receivedAtMs || Date.now());
     }, 1000);
   }
@@ -2638,6 +2642,7 @@ function App() {
       setRollStatus(`Live subscribing ${rollLiveContext.refIds.length} legs`);
     };
     ws.onmessage = (e) => {
+      if (!isMarketHours()) { stopRollLive(); setRollStatus("Market closed (after 3:30 PM)"); return; }
       let msg; try { msg = JSON.parse(e.data); } catch { return; }
       if (msg.event === "option" && msg.data) handleRollLiveChain(msg.data, msg.received_at_ms);
       if (msg.event === "orderbook" && msg.data) handleRollLiveOrderbook(msg.data, msg.received_at_ms);
