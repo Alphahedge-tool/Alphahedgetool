@@ -18,6 +18,13 @@ function readParquet(buffer) {
   return rows;
 }
 
+function isMarketHours() {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const h = ist.getHours(), m = ist.getMinutes();
+  return (h < 15 || (h === 15 && m < 30));
+}
+
 const rupee = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -1585,6 +1592,7 @@ function App() {
   function startMarketStripLive() {
     stopMarketStripLive();
     if (!authed()) return;
+    if (!isMarketHours()) { setMarketStripStatus("Market closed (after 3:30 PM)"); return; }
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${location.host}/ws/live`);
     marketStripSocket = socket;
@@ -1630,7 +1638,7 @@ function App() {
       if (marketStripSocket !== socket) return;
       marketStripSocket = null;
       setMarketStripStatus("Live stream reconnecting");
-      if (authed()) marketStripReconnectTimer = window.setTimeout(startMarketStripLive, 3000);
+      if (authed() && isMarketHours()) marketStripReconnectTimer = window.setTimeout(startMarketStripLive, 3000);
     };
   }
 
@@ -2103,6 +2111,7 @@ function App() {
 
   function startChainLive() {
     if (chainLiveSocket) { chainLiveSocket.close(); chainLiveSocket = null; }
+    if (!isMarketHours()) { setChainStatus("Market closed (after 3:30 PM)"); return; }
     const sym = chainSymbol().trim().toUpperCase();
     const expiry = chainData()?.expiry || chainExpiry();
     if (!sym) { setChainStatus("Symbol needed"); return; }
@@ -2582,6 +2591,7 @@ function App() {
 
   function startRollLive() {
     if (rollLiveSocket) { rollLiveSocket.close(); rollLiveSocket = null; }
+    if (!isMarketHours()) { setRollStatus("Market closed (after 3:30 PM)"); return; }
     const expiry = rollExpiry();
     if (!expiry) { setRollStatus("Select expiry first"); return; }
     if (!token().trim() || !deviceId().trim()) { setRollStatus("Session needed"); return; }
