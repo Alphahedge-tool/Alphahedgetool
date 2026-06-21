@@ -5,9 +5,52 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Nubra Market Research</title>
     <script src="/vendor/lightweight-charts.standalone.production.js"></script>
+    <style>
+      *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+      html,body{height:100%;background:#080808}
+      #root{min-height:100vh}
+      #app-boot{
+        position:fixed;inset:0;display:flex;flex-direction:column;
+        align-items:center;justify-content:center;gap:18px;
+        background:#080808;z-index:9999;
+        transition:opacity 180ms ease;
+      }
+      #app-boot.hidden{opacity:0;pointer-events:none}
+      .boot-logo{
+        width:36px;height:36px;border-radius:8px;
+        background:#00c8c8;display:grid;place-items:center;
+        color:#080808;font-size:18px;font-weight:800;font-family:system-ui,sans-serif;
+      }
+      .boot-label{
+        color:#4a4a5a;font-size:11px;font-family:system-ui,sans-serif;
+        letter-spacing:.1em;text-transform:uppercase;
+      }
+      .boot-ring{
+        width:28px;height:28px;border-radius:50%;
+        border:2px solid #1a1a2e;border-top-color:#00c8c8;
+        animation:boot-spin 700ms linear infinite;
+      }
+      @keyframes boot-spin{to{transform:rotate(360deg)}}
+    </style>
   </head>
   <body>
+    <div id="app-boot">
+      <div class="boot-logo">N</div>
+      <div class="boot-ring"></div>
+      <div class="boot-label">Options Intelligence</div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    <script>
+      // Hide boot screen once SolidJS has mounted anything into #root
+      const observer = new MutationObserver(() => {
+        if (document.getElementById('root').children.length) {
+          const el = document.getElementById('app-boot');
+          if (el) { el.classList.add('hidden'); setTimeout(() => el.remove(), 200); }
+          observer.disconnect();
+        }
+      });
+      observer.observe(document.getElementById('root'), { childList: true });
+    </script>
   </body>
 </html>

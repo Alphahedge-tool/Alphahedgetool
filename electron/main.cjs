@@ -80,6 +80,7 @@ function createMainWindow() {
     minHeight: 680,
     title: "Nubra Options Intelligence",
     backgroundColor: "#080808",
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -87,6 +88,7 @@ function createMainWindow() {
     }
   });
   attachWindowDiagnostics(mainWindow, "main");
+  mainWindow.once("ready-to-show", () => mainWindow.show());
   mainWindow.loadURL(appUrl);
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -114,6 +116,7 @@ function createWidgetWindow() {
     maximizable: true,
     skipTaskbar: false,
     backgroundColor: "#080808",
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -121,7 +124,10 @@ function createWidgetWindow() {
     }
   });
   attachWindowDiagnostics(widgetWindow, "widget");
-  widgetWindow.setAlwaysOnTop(true, "screen-saver");
+  widgetWindow.once("ready-to-show", () => {
+    widgetWindow.show();
+    widgetWindow.setAlwaysOnTop(true, "screen-saver");
+  });
   widgetWindow.loadURL(`${appUrl}?view=widget`);
   const sendMaximizedState = () => {
     if (widgetWindow && !widgetWindow.isDestroyed()) {

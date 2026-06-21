@@ -1,0 +1,367 @@
+/* ═══════════════════════════════════════════════════════════════
+   gamma.css — Gamma Density (Γ×OI) view under Option Chain
+   Mirrors the iv-term layout; reuses shared design tokens.
+   ═══════════════════════════════════════════════════════════════ */
+
+.gamma-workspace {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-0);
+}
+
+/* metrics + charts get the inner padding; toolbar/stats-bar are flush */
+.gamma-metrics,
+.gamma-content {
+  margin: 0 12px;
+}
+.gamma-metrics { margin-top: 10px; }
+.gamma-content { margin-top: 10px; margin-bottom: 12px; flex: 1; min-height: 0; }
+
+.gamma-toolbar {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+.gamma-toolbar > div:first-child { min-width: 190px; margin-right: 4px; }
+.gamma-toolbar h2 { margin: 1px 0 0; color: var(--tx-1); font-size: 15px; font-weight: 750; }
+.gamma-eyebrow { color: var(--blue-text); font-size: 9px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.gamma-status { margin-left: auto; color: var(--tx-4); font-size: 10px; white-space: nowrap; }
+
+/* stat cards row */
+.gamma-metrics {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 8px;
+}
+.gamma-metrics > div {
+  display: flex;
+  min-height: 58px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 9px 12px;
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+.gamma-metrics span { color: var(--tx-4); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.gamma-metrics strong { color: var(--tx-1); font-family: var(--mono); font-size: 15px; font-variant-numeric: tabular-nums; }
+.gamma-metrics strong.up   { color: var(--bull); }
+.gamma-metrics strong.down { color: var(--bear); }
+.gamma-metrics strong.iv   { color: var(--blue-text); }
+.gamma-metrics .gamma-metric-sub { color: var(--tx-5); font-size: 9px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+
+/* two side-by-side chart panels */
+.gamma-content {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: 1fr;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.gamma-chart-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-md);
+  background: var(--bg-1);
+}
+.gamma-chart-head {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--bd-1);
+}
+.gamma-chart-head > div { display: flex; flex-direction: column; gap: 2px; }
+.gamma-chart-head strong { color: var(--tx-1); font-size: 12px; }
+.gamma-chart-head span { color: var(--tx-4); font-size: 10px; }
+
+.gamma-chart-shell { position: relative; display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; overflow: hidden; }
+.gamma-chart { width: 100%; flex: 1 1 0; min-height: 0; overflow: hidden; }
+/* uPlot fills its host exactly — sized by ResizeObserver, not CSS */
+.gamma-chart canvas { display: block; }
+.gamma-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--tx-4);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* peak-strike chip inside chart head */
+.gamma-peak-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: rgba(245,158,11,0.12);
+  border: 1px solid rgba(245,158,11,0.3);
+  color: var(--warn);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* ── Vol Surface ── */
+.vs-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--bd-1);
+  background: var(--bg-1);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.vs-topbar-left  { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.vs-topbar-right { display: flex; align-items: center; gap: 8px; }
+.vs-topbar-divider { width: 1px; height: 22px; background: var(--bd-1); margin: 0 2px; flex-shrink: 0; }
+
+.vs-sym-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--bd-1);
+  background: var(--bg-2);
+  color: var(--tx-3);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+}
+.vs-sym-btn:hover   { background: var(--blue-dim); color: var(--blue-text); border-color: rgba(65,130,255,0.3); }
+.vs-sym-btn.active  { background: var(--blue-dim); color: var(--blue-text); border-color: rgba(65,130,255,0.4); }
+.vs-sym-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.vs-loading-status { color: var(--tx-4); font-size: 10px; white-space: nowrap; }
+
+.vs-empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+}
+.vs-empty-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--tx-4);
+  font-size: 12px;
+  text-align: center;
+}
+.vs-empty-icon { font-size: 32px; opacity: 0.25; margin-bottom: 4px; }
+.vs-empty-inner strong { color: var(--tx-2); font-size: 14px; }
+.vs-empty-inner em { color: var(--blue-text); font-style: normal; }
+
+.vol-surface-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  margin: 10px 12px 12px;
+  gap: 8px;
+}
+.vol-surface-table-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-md);
+  background: var(--bg-1);
+}
+.vol-surface-table {
+  border-collapse: collapse;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.vol-surface-table th {
+  position: sticky;
+  top: 0;
+  padding: 5px 8px;
+  background: var(--bg-2);
+  color: var(--tx-4);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--bd-1);
+  z-index: 2;
+}
+.vol-surface-table .vs-expiry-head {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  text-align: left;
+}
+.vs-expiry-cell {
+  position: sticky;
+  left: 0;
+  padding: 4px 10px;
+  background: var(--bg-2);
+  color: var(--tx-3);
+  font-size: 10px;
+  font-weight: 600;
+  border-right: 1px solid var(--bd-1);
+  z-index: 1;
+}
+.vs-iv-cell {
+  padding: 4px 7px;
+  text-align: center;
+  color: var(--tx-1);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid rgba(255,255,255,0.04);
+  cursor: default;
+  transition: filter 120ms;
+}
+.vs-iv-cell:hover { filter: brightness(1.35); }
+.vs-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+}
+.vs-legend-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(to right, rgb(59 130 246 / 0.4), rgb(245 158 11 / 0.7), rgb(239 68 68 / 0.7));
+  border: 1px solid var(--bd-1);
+}
+
+/* 3D Plotly surface host */
+.vs-3d-host {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+/* Plotly overrides for dark bg */
+.vs-3d-host .js-plotly-plot { width: 100% !important; height: 100% !important; }
+
+/* 3D / Table view toggle */
+.vs-view-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  border: 1px solid var(--bd-1);
+}
+.vs-view-toggle button {
+  height: 22px;
+  padding: 0 10px;
+  border-radius: calc(var(--r-sm) - 2px);
+  border: none;
+  background: transparent;
+  color: var(--tx-4);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 100ms, color 100ms;
+}
+.vs-view-toggle button.active { background: var(--blue-dim); color: var(--blue-text); }
+.vs-view-toggle button:hover:not(.active) { color: var(--tx-2); }
+
+/* uPlot container inside OI time series — legend is hidden, chips in header instead */
+.oi-ts-chart .u-legend { display: none !important; }
+.oi-ts-strike-strip {
+  display: flex !important;
+  flex: 0 1 auto;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px !important;
+  max-width: min(72%, 1100px);
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: thin;
+}
+.oi-ts-strike-strip .gamma-peak-chip { flex: 0 0 auto; }
+.oi-ts-reset {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid var(--bd-2);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  color: var(--tx-3);
+  font: 700 10px/1 var(--font);
+  cursor: pointer;
+}
+.oi-ts-reset:hover { border-color: var(--blue); color: var(--blue-text); }
+.oi-ts-chart .u-over { cursor: grab; touch-action: none; }
+.oi-ts-chart .u-over.is-panning { cursor: grabbing; }
+.oi-ts-tooltip {
+  position: absolute;
+  z-index: 30;
+  display: flex;
+  min-width: 145px;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  pointer-events: none;
+  border: 1px solid color-mix(in srgb, var(--oi-tip-color) 55%, var(--bd-2));
+  border-radius: var(--r-md);
+  background: rgba(16, 16, 18, .96);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .55);
+  backdrop-filter: blur(14px);
+  white-space: nowrap;
+}
+.oi-ts-tip-time {
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--bd-1);
+  color: var(--tx-4);
+  font: 700 9px/1 var(--mono);
+  letter-spacing: .04em;
+}
+.oi-ts-tip-strike {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--tx-1);
+  font: 750 12px/1.2 var(--mono);
+}
+.oi-ts-tip-strike i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--oi-tip-color);
+  box-shadow: 0 0 7px var(--oi-tip-color);
+}
+.oi-ts-tip-value { color: var(--tx-4); font-size: 10px; }
+.oi-ts-tip-value strong { color: var(--oi-tip-color); font-family: var(--mono); }
+
+@media (max-width: 1100px) {
+  .gamma-metrics { grid-template-columns: repeat(4, 1fr); }
+  .gamma-content { grid-template-columns: 1fr; overflow-y: auto; }
+}
+@media (max-width: 640px) {
+  .gamma-metrics { grid-template-columns: repeat(2, 1fr); }
+}
