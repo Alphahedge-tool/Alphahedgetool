@@ -14,11 +14,14 @@ export function OptionCell(props) {
     return `${formatPlain(n, props.digits ?? 2)}${props.suffix || ""}`;
   };
   const className = () => [props.class, props.tone ? `chain-cell-${props.tone}` : ""].filter(Boolean).join(" ");
+  // tag may be a plain string ("LB") or { label, strong }
+  const tagLabel = () => (typeof props.tag === "object" ? props.tag?.label : props.tag);
+  const tagStrong = () => (typeof props.tag === "object" ? props.tag?.strong : false);
   return (
     <td class={className()} style={props.style || ""}>
       {display()}
-      <Show when={props.tag}>
-        <span class={`oi-tag oi-tag-${props.tag?.toLowerCase()}`}>{props.tag}</span>
+      <Show when={tagLabel()}>
+        <span class={`oi-tag oi-tag-${tagLabel()?.toLowerCase()}${tagStrong() ? " oi-tag-strong" : ""}`}>{tagLabel()}</span>
       </Show>
     </td>
   );

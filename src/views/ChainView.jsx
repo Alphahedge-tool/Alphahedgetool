@@ -326,16 +326,18 @@ export function ChainView() {
             >
               <table class="table table-xs chain-table">
                 <thead>
+                  <tr class="chain-group-row">
+                    <th class="chain-group-call" colspan={visibleCallColumns().length}>CALLS</th>
+                    <th class="chain-group-strike">Strike</th>
+                    <th class="chain-group-put" colspan={visiblePutColumns().length}>PUTS</th>
+                  </tr>
                   <tr>
                     <For each={visibleCallColumns()}>
                       {(key) => {
                         const extra = key === "iv" ? "chain-head-iv" : key === "ltp" ? "chain-head-ltp" : key === "oi_change" ? "chain-head-oi-change" : "";
                         return (
                           <th class={["chain-th-call", extra].filter(Boolean).join(" ")}>
-                            <Show when={key === "ltp"} fallback={chainColumnLabel(key)}>
-                              <span>{chainColumnLabel(key)}</span>
-                              <span style="display:inline-flex;align-items:center;justify-content:center;height:16px;padding:0 5px;margin-left:5px;border-radius:3px;font-size:9px;font-weight:800;background:rgba(5,184,120,0.15);color:rgb(5,184,120);border:1px solid rgba(5,184,120,0.3)">CE</span>
-                            </Show>
+                            {chainColumnLabel(key)}
                           </th>
                         );
                       }}
@@ -346,10 +348,7 @@ export function ChainView() {
                         const extra = key === "iv" ? "chain-head-iv" : key === "ltp" ? "chain-head-ltp" : key === "oi_change" ? "chain-head-oi-change" : "";
                         return (
                           <th class={["chain-th-put", extra].filter(Boolean).join(" ")}>
-                            <Show when={key === "ltp"} fallback={chainColumnLabel(key)}>
-                              <span style="display:inline-flex;align-items:center;justify-content:center;height:16px;padding:0 5px;margin-right:5px;border-radius:3px;font-size:9px;font-weight:800;background:rgba(240,79,79,0.15);color:rgb(240,79,79);border:1px solid rgba(240,79,79,0.3)">PE</span>
-                              <span>{chainColumnLabel(key)}</span>
-                            </Show>
+                            {chainColumnLabel(key)}
                           </th>
                         );
                       }}

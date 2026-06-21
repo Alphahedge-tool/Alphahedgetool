@@ -2,17 +2,33 @@
    chain.css — option chain table, chain toolbar, symbol search
    ═══════════════════════════════════════════════════════════════ */
 
-/* ── chain toolbar ── */
+/* ── chain toolbar — elevated glass control surface ── */
 .chain-toolbar {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 12px;
-  min-height: 48px;
-  background: var(--bg-2);
-  border-bottom: 1px solid var(--bd-1);
+  gap: 10px;
+  padding: 0 14px;
+  min-height: 52px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.022), rgba(255,255,255,0)),
+    rgba(20,20,23,0.96);
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.04) inset,
+    0 8px 20px -10px rgba(0,0,0,0.6);
   flex-shrink: 0;
   overflow: visible;
+  z-index: 5;
+}
+/* thin accent hairline along the top edge — cohesive with the header */
+.chain-toolbar::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(41,98,255,0.28) 25%, rgba(41,98,255,0.28) 75%, transparent);
+  opacity: 0.45;
 }
 /* scroll the inner left portion only, not the right actions */
 .chain-toolbar-scroll {
@@ -28,9 +44,10 @@
 
 .chain-toolbar-divider {
   width: 1px;
-  height: 24px;
-  background: var(--bd-2);
+  height: 22px;
+  background: rgba(255,255,255,0.07);
   flex-shrink: 0;
+  margin: 0 2px;
 }
 
 .chain-toolbar-right {
@@ -41,37 +58,42 @@
   flex-shrink: 0;
 }
 
-/* search trigger button */
+/* search trigger button — anchors the toolbar's left side */
 .chain-search-btn {
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 12px;
-  border: 1px solid rgba(41,98,255,0.3);
+  gap: 9px;
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(41,98,255,0.32);
   border-radius: var(--r);
-  background: var(--blue-dim);
+  background: linear-gradient(180deg, rgba(41,98,255,0.16), rgba(41,98,255,0.09));
   color: var(--tx-1);
   cursor: pointer;
   flex-shrink: 0;
-  min-width: 160px;
-  transition: border-color 120ms, background-color 120ms;
+  min-width: 170px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+  transition: border-color 140ms, background 140ms, box-shadow 140ms, transform 140ms;
 }
 .chain-search-btn:hover {
-  border-color: rgba(41,98,255,0.55);
-  background: rgba(41,98,255,0.18);
+  border-color: rgba(41,98,255,0.6);
+  background: linear-gradient(180deg, rgba(41,98,255,0.24), rgba(41,98,255,0.14));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 2px 10px -3px rgba(41,98,255,0.5);
+  transform: translateY(-1px);
 }
 .chain-search-btn svg { color: var(--blue-text); flex-shrink: 0; }
 .chain-search-btn-text {
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 750;
   color: var(--tx-1);
   white-space: nowrap;
+  letter-spacing: -0.01em;
 }
 .chain-search-btn-sub {
   font-size: 10px;
-  color: var(--tx-3);
+  color: rgba(147,180,255,0.7);
   white-space: nowrap;
+  font-weight: 600;
 }
 
 /* field with label above */
@@ -287,15 +309,52 @@
   line-height: 1;
 }
 
-.chain-table th {
+/* ── grouped CALLS / PUTS header band (top sticky row) ── */
+.chain-group-row th {
   position: sticky;
   top: 0;
+  z-index: 12;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-align: center;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--bd-1);
+}
+.chain-group-row th.chain-group-call {
+  background: linear-gradient(180deg, rgba(5,184,120,0.16), rgba(5,184,120,0.06));
+  color: var(--bull);
+  border-bottom: 1px solid rgba(5,184,120,0.3) !important;
+  text-align: left;
+  padding-left: 14px;
+}
+.chain-group-row th.chain-group-put {
+  background: linear-gradient(180deg, rgba(240,79,79,0.16), rgba(240,79,79,0.06));
+  color: var(--bear);
+  border-bottom: 1px solid rgba(240,79,79,0.3) !important;
+  text-align: right;
+  padding-right: 14px;
+}
+.chain-group-strike {
+  background: var(--bg-3);
+  color: var(--tx-3);
+  border-left: 1.5px solid rgba(255,255,255,0.12);
+  border-right: 1.5px solid rgba(255,255,255,0.12);
+  letter-spacing: 0.06em;
+}
+
+.chain-table th {
+  position: sticky;
+  top: 26px;            /* sit below the group band */
   z-index: 10;
   min-width: 72px;
   height: 32px;
   padding: 0 8px;
   background: var(--bg-2);
   border-bottom: 2px solid var(--bd-2);
+  border-right: 1px solid rgba(255,255,255,0.04);
   color: var(--tx-4);
   font-size: 11px;
   font-weight: 600;
@@ -320,38 +379,48 @@
 
 .chain-table td {
   min-width: 72px;
-  height: 28px;
-  padding: 0 8px;
+  height: 30px;
+  padding: 0 9px;
   border-bottom: 1px solid var(--bd-1);
+  /* faint vertical column rule so the eye tracks straight down */
+  border-right: 1px solid rgba(255,255,255,0.035);
   background: var(--bg-0);
-  color: var(--tx-2);
+  /* TIER 3 (default): Greeks — readable but quiet (lifted from --tx-3) */
+  color: rgb(165,165,185);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11.5px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
 }
 
 /* call side cells — very subtle green bg */
-.chain-td-call { background: rgba(5,184,120,0.025) !important; }
+.chain-td-call { background: rgba(5,184,120,0.022) !important; }
 /* put side cells — very subtle red bg */
-.chain-td-put  { background: rgba(240,79,79,0.025) !important; }
+.chain-td-put  { background: rgba(240,79,79,0.022) !important; }
 
-/* generic first so the tinted side-cells win on source order, not paint order */
-.chain-table tbody tr:hover td             { background: var(--bg-3) !important; }
-.chain-table tbody tr:hover .chain-td-call { background: rgba(5,184,120,0.06) !important; }
-.chain-table tbody tr:hover .chain-td-put  { background: rgba(240,79,79,0.06) !important; }
+/* zebra striping — alternating rows get a faint lift so the eye tracks lines */
+.chain-table tbody tr:nth-child(even) td             { background: rgba(255,255,255,0.018) !important; }
+.chain-table tbody tr:nth-child(even) .chain-td-call { background: rgba(5,184,120,0.04) !important; }
+.chain-table tbody tr:nth-child(even) .chain-td-put  { background: rgba(240,79,79,0.04) !important; }
 
-/* strike column */
+/* hover — clear full-row highlight (wins over zebra) */
+.chain-table tbody tr:hover td             { background: rgba(255,255,255,0.06) !important; }
+.chain-table tbody tr:hover .chain-td-call { background: rgba(5,184,120,0.1) !important; }
+.chain-table tbody tr:hover .chain-td-put  { background: rgba(240,79,79,0.1) !important; }
+.chain-table tbody tr:hover td { box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), inset 0 -1px 0 rgba(255,255,255,0.06); }
+
+/* strike column — center spine of the ladder */
 .chain-table .strike-head,
 .chain-table .strike-cell {
   min-width: 96px;
-  background: var(--bg-2) !important;
+  background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)), var(--bg-2) !important;
   color: var(--tx-1);
   text-align: center;
   font-weight: 700;
-  border-left: 1px solid var(--bd-2);
-  border-right: 1px solid var(--bd-2);
+  border-left: 1.5px solid rgba(255,255,255,0.12);
+  border-right: 1.5px solid rgba(255,255,255,0.12);
   position: relative;
   z-index: 11;
 }
@@ -399,36 +468,85 @@
   white-space: nowrap;
 }
 
-/* colored cells — LTP change, percent */
-.chain-cell-up   { color: var(--bull) !important; }
-.chain-cell-dn   { color: var(--bear) !important; }
-.chain-cell-neu  { color: var(--tx-3) !important; }
+/* TIER 2 — OI change: colored direction, bold */
+.chain-cell-up   { color: var(--bull) !important; font-weight: 700; font-size: 12px; }
+.chain-cell-dn   { color: var(--bear) !important; font-weight: 700; font-size: 12px; }
+.chain-cell-neu  { color: var(--tx-4) !important; }
 
-/* IV column — blue tint */
-.chain-cell-iv   { color: var(--blue-text) !important; }
+/* TIER 2 — IV: blue tint, readable */
+.chain-cell-iv   { color: var(--blue-text) !important; font-weight: 600; font-size: 12px; }
 
-/* LTP column — brighter */
-.chain-cell-ltp  { color: var(--tx-1) !important; font-weight: 700; }
+/* TIER 1 — LTP: the loudest column, bright white + bold + larger */
+.chain-cell-ltp  {
+  color: var(--tx-1) !important;
+  font-weight: 800;
+  font-size: 12.5px;
+  letter-spacing: -0.01em;
+}
 
-/* OI mini-bars */
-.chain-put-bar.chain-cell-oi-put   { position: relative; color: var(--bear) !important; }
-.chain-call-bar.chain-cell-oi-call { position: relative; color: var(--bull) !important; }
+/* ── OI full-cell heatmap bars (Zerodha/Sensibull style) ── */
+/* Bars fill the cell proportional to OI; CE grows from the strike side (right),
+   PE grows from the strike side (left), so call/put walls meet at the spine. */
+.chain-call-bar.chain-cell-oi-call,
+.chain-put-bar.chain-cell-oi-put {
+  position: relative;
+  z-index: 0;
+  font-weight: 700;
+}
+.chain-call-bar.chain-cell-oi-call { color: var(--tx-1) !important; }
+.chain-put-bar.chain-cell-oi-put   { color: var(--tx-1) !important; }
 
-.chain-put-bar.chain-cell-oi-put::after,
-.chain-call-bar.chain-cell-oi-call::after {
+.chain-call-bar.chain-cell-oi-call::after,
+.chain-put-bar.chain-cell-oi-put::after {
   content: "";
   position: absolute;
-  right: 8px;
-  bottom: 2px;
+  top: 0;
+  bottom: 0;
   width: var(--oi-bar, 0%);
-  max-width: calc(100% - 16px);
-  height: 2px;
-  border-radius: 2px;
+  z-index: -1;
   pointer-events: none;
-  transition: width 180ms ease-out;
+  transition: width 220ms cubic-bezier(.2,.7,.3,1);
 }
-.chain-put-bar.chain-cell-oi-put::after   { background: var(--bear); opacity: 0.5; }
-.chain-call-bar.chain-cell-oi-call::after { background: var(--bull); opacity: 0.5; }
+/* call side: bold solid fill anchored to the right edge (toward strike) */
+.chain-call-bar.chain-cell-oi-call::after {
+  right: 0;
+  background: linear-gradient(270deg, rgba(5,184,120,0.55), rgba(5,184,120,0.22));
+  border-right: 2px solid rgba(5,184,120,0.85);
+}
+/* put side: bold solid fill anchored to the left edge (toward strike) */
+.chain-put-bar.chain-cell-oi-put::after {
+  left: 0;
+  background: linear-gradient(90deg, rgba(240,79,79,0.58), rgba(240,79,79,0.24));
+  border-left: 2px solid rgba(240,79,79,0.9);
+}
+/* keep the number readable above its own bar */
+.chain-call-bar.chain-cell-oi-call,
+.chain-put-bar.chain-cell-oi-put { text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+
+/* ── OI-change cells get their own directional bar (green up / red down) ── */
+.chain-cell-oi-change {
+  position: relative;
+  z-index: 0;
+  font-weight: 700 !important;
+}
+.chain-cell-oi-change.up   { color: var(--bull) !important; }
+.chain-cell-oi-change.down { color: var(--bear) !important; }
+.chain-cell-oi-change::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0;
+  z-index: -1;
+  width: var(--oi-bar, 0%);
+  pointer-events: none;
+  transition: width 220ms cubic-bezier(.2,.7,.3,1);
+}
+/* call side OI-change grows from right, put side from left (mirror) */
+.chain-td-call.chain-cell-oi-change::after { right: 0; }
+.chain-td-put.chain-cell-oi-change::after  { left: 0; }
+.chain-cell-oi-change.up::after   { background: linear-gradient(var(--g, 270deg), rgba(5,184,120,0.3), rgba(5,184,120,0.05)); }
+.chain-cell-oi-change.down::after { background: linear-gradient(var(--g, 270deg), rgba(240,79,79,0.3), rgba(240,79,79,0.05)); }
+.chain-td-put.chain-cell-oi-change::after { --g: 90deg; }
+.chain-cell-oi-change { text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
 
 .chain-cell-filtered { opacity: 0.2; }
 
@@ -883,22 +1001,45 @@
   color: var(--tx-1);
 }
 
+/* ── OI interpretation tags — Sensibull-style pills with direction arrows ── */
 .oi-tag {
   display: inline-flex;
   align-items: center;
+  gap: 2px;
   justify-content: center;
-  height: 14px;
-  min-width: 22px;
-  margin-left: 5px;
-  padding: 0 4px;
-  border-radius: 3px;
-  font-size: 8px;
-  font-weight: 900;
-  letter-spacing: 0.06em;
+  height: 16px;
+  min-width: 30px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
   vertical-align: middle;
   line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
 }
-.oi-tag-lb { background: rgba(5,184,120,0.15);  color: var(--bull); border: 1px solid rgba(5,184,120,0.35); }
-.oi-tag-sb { background: rgba(240,79,79,0.14);  color: var(--bear); border: 1px solid rgba(240,79,79,0.32); }
-.oi-tag-sc { background: rgba(240,165,0,0.13);  color: var(--warn); border: 1px solid rgba(240,165,0,0.30); }
-.oi-tag-lu { background: rgba(41,98,255,0.12);  color: var(--blue-text); border: 1px solid rgba(41,98,255,0.28); }
+/* arrow glyph before the label */
+.oi-tag::before {
+  font-size: 8px;
+  font-weight: 900;
+  line-height: 1;
+}
+.oi-tag-lb::before { content: "▲"; }   /* Long Buildup — bullish */
+.oi-tag-sc::before { content: "▲"; }   /* Short Covering — bullish */
+.oi-tag-sb::before { content: "▼"; }   /* Short Buildup — bearish */
+.oi-tag-lu::before { content: "▼"; }   /* Long Unwinding — bearish */
+
+/* DEFAULT (common case): muted + low contrast so the column isn't a wall of color */
+.oi-tag { opacity: 0.5; }
+.oi-tag-lb { background: rgba(5,184,120,0.08);  color: rgba(5,184,120,0.85); border: 1px solid rgba(5,184,120,0.22); }
+.oi-tag-sc { background: rgba(5,184,120,0.06);  color: rgba(61,220,151,0.85); border: 1px solid rgba(5,184,120,0.18); }
+.oi-tag-sb { background: rgba(240,79,79,0.08);  color: rgba(240,79,79,0.85); border: 1px solid rgba(240,79,79,0.22); }
+.oi-tag-lu { background: rgba(240,79,79,0.06);  color: rgba(255,133,133,0.85); border: 1px solid rgba(240,79,79,0.18); }
+
+/* STRONG (OI move >20%): full opacity, brighter, subtle glow — these are the signals */
+.oi-tag.oi-tag-strong { opacity: 1; box-shadow: inset 0 1px 0 rgba(255,255,255,0.1); }
+.oi-tag-strong.oi-tag-lb { background: rgba(5,184,120,0.2);  color: var(--bull); border-color: rgba(5,184,120,0.5); box-shadow: 0 0 6px -1px rgba(5,184,120,0.5), inset 0 1px 0 rgba(255,255,255,0.12); }
+.oi-tag-strong.oi-tag-sc { background: rgba(5,184,120,0.16); color: #3ddc97;     border-color: rgba(5,184,120,0.42); }
+.oi-tag-strong.oi-tag-sb { background: rgba(240,79,79,0.2);  color: var(--bear); border-color: rgba(240,79,79,0.5); box-shadow: 0 0 6px -1px rgba(240,79,79,0.5), inset 0 1px 0 rgba(255,255,255,0.12); }
+.oi-tag-strong.oi-tag-lu { background: rgba(240,79,79,0.15); color: #ff8585;     border-color: rgba(240,79,79,0.4); }

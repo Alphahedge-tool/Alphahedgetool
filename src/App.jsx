@@ -94,10 +94,14 @@ function App() {
       if (!prevOi) return null;
       const oiUp = oi > prevOi;
       const ltpUp = ltp >= 0;
-      if (oiUp && ltpUp)  return "LB";  // Long Buildup
-      if (oiUp && !ltpUp) return "SB";  // Short Buildup
-      if (!oiUp && ltpUp) return "SC";  // Short Covering
-      return "LU";                       // Long Unwinding
+      // significant when OI moved >20% vs prior — only these get highlighted
+      const strong = Math.abs(oi - prevOi) / prevOi >= 0.20;
+      let label;
+      if (oiUp && ltpUp)  label = "LB";  // Long Buildup
+      else if (oiUp && !ltpUp) label = "SB";  // Short Buildup
+      else if (!oiUp && ltpUp) label = "SC";  // Short Covering
+      else label = "LU";                       // Long Unwinding
+      return { label, strong };
     };
     return {
       ce: tag(ceOi, cePrevOi, ceLtp),
@@ -4976,10 +4980,10 @@ function App() {
       <Show when={!widgetMode}>
       <header class="app-shell-header">
         <div class="app-shell-brand">
-          <div class="grid h-7 w-7 shrink-0 place-items-center rounded font-bold text-xs" style="background:var(--accent-cyan);color:#0d1117">N</div>
-          <div class="min-w-0">
-            <p class="text-[9px] font-semibold" style="color:var(--text-tertiary);letter-spacing:0">Nubra</p>
-            <h1 class="truncate text-[13px] font-semibold" style="color:var(--text-primary)">Options Intelligence</h1>
+          <div class="brand-mark">N</div>
+          <div class="brand-text min-w-0">
+            <p class="brand-eyebrow">NUBRA</p>
+            <h1 class="brand-title truncate">Options Intelligence</h1>
           </div>
         </div>
 
@@ -5080,8 +5084,8 @@ function App() {
         </div>
 
         <div class="app-shell-actions">
-          <button data-ui="button"
-            data-appearance="stealth"
+          <button
+            class="header-icon-btn"
             type="button"
             aria-label="Open app and chart guide"
             title="App and chart guide"
