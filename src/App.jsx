@@ -2980,13 +2980,14 @@ function App() {
   function startChainLive() {
     if (chainCutoffTimer) { clearTimeout(chainCutoffTimer); chainCutoffTimer = null; }
     if (chainLiveSocket) { chainLiveSocket.close(); chainLiveSocket = null; }
-    if (!isMarketHours()) {
+    const _chainExch = chainExchange();
+    if (!isMarketHours(_chainExch)) {
       const rowCount = chainRowCount(chainData());
-      setChainStatus(rowCount ? `${rowCount} strikes · Market closed` : "Market closed (after 3:30 PM)");
+      setChainStatus(rowCount ? `${rowCount} strikes · Market closed` : "Market closed");
       return;
     }
-    const cutoffMs = msUntilMarketClose();
-    if (cutoffMs > 0) chainCutoffTimer = setTimeout(() => { stopChainLive(); setChainStatus("Market closed (after 3:30 PM)"); }, cutoffMs);
+    const cutoffMs = msUntilMarketClose(_chainExch);
+    if (cutoffMs > 0) chainCutoffTimer = setTimeout(() => { stopChainLive(); setChainStatus("Market closed"); }, cutoffMs);
     const sym = chainSymbol().trim().toUpperCase();
     const expiry = chainData()?.expiry || chainExpiry();
     const refIds = [...new Set([
@@ -3020,7 +3021,7 @@ function App() {
       setChainStatus("Live subscribing");
     };
     ws.onmessage = (event) => {
-      if (!isMarketHours()) { stopChainLive(); setChainStatus("Market closed (after 3:30 PM)"); return; }
+      if (!isMarketHours(chainExchange())) { stopChainLive(); setChainStatus("Market closed"); return; }
       let msg; try { msg = JSON.parse(event.data); } catch { return; }
       if (msg.event === "option" && msg.data) handleChainLiveTick(msg.data);
       if (msg.event === "status" && msg.status === "connected") setChainStatus("Live connected");
@@ -3319,7 +3320,7 @@ function App() {
     if (rollLiveContext.frames.live) cancelAnimationFrame(rollLiveContext.frames.live);
 
     const step = (now) => {
-      if (!rollLiveContext || !rollChart || !isMarketHours()) return;
+      if (!rollLiveContext || !rollChart || !isMarketHours(rollExchange())) return;
       const progress = Math.min(1, (now - started) / duration);
       const eased = 1 - Math.pow(1 - progress, 3);
       const bid = start.bid + (target.bid - start.bid) * eased;
@@ -3434,11 +3435,11 @@ function App() {
   }
 
   function scheduleRollLiveUpdate(receivedAtMs) {
-    if (!isMarketHours()) { stopRollLive(); setRollStatus("Market closed (after 3:30 PM)"); return; }
+    if (!isMarketHours(rollExchange())) { stopRollLive(); setRollStatus("Market closed"); return; }
     if (rollLiveFlushTimer) return;
     rollLiveFlushTimer = setTimeout(() => {
       rollLiveFlushTimer = null;
-      if (!isMarketHours()) { stopRollLive(); setRollStatus("Market closed (after 3:30 PM)"); return; }
+      if (!isMarketHours(rollExchange())) { stopRollLive(); setRollStatus("Market closed"); return; }
       updateRollLiveSnapshot(receivedAtMs || Date.now());
     }, 250);
   }
@@ -3485,9 +3486,10 @@ function App() {
     resetMonitorState();
     if (rollCutoffTimer) { clearTimeout(rollCutoffTimer); rollCutoffTimer = null; }
     if (rollLiveSocket) { rollLiveSocket.close(); rollLiveSocket = null; }
-    if (!isMarketHours()) { setRollStatus("Market closed (after 3:30 PM)"); return; }
-    const cutoffMs = msUntilMarketClose();
-    if (cutoffMs > 0) rollCutoffTimer = setTimeout(() => { stopRollLive(); setRollStatus("Market closed (after 3:30 PM)"); }, cutoffMs);
+    const _rollExch = rollExchange();
+    if (!isMarketHours(_rollExch)) { setRollStatus("Market closed"); return; }
+    const cutoffMs = msUntilMarketClose(_rollExch);
+    if (cutoffMs > 0) rollCutoffTimer = setTimeout(() => { stopRollLive(); setRollStatus("Market closed"); }, cutoffMs);
     const expiry = rollExpiry();
     if (!expiry) { setRollStatus("Select expiry first"); return; }
     if (!token().trim() || !deviceId().trim()) { setRollStatus("Session needed"); return; }
@@ -3513,7 +3515,7 @@ function App() {
       setRollStatus(`Live subscribing ${rollLiveContext.refIds.length} legs`);
     };
     ws.onmessage = (e) => {
-      if (!isMarketHours()) { stopRollLive(); setRollStatus("Market closed (after 3:30 PM)"); return; }
+      if (!isMarketHours(rollExchange())) { stopRollLive(); setRollStatus("Market closed"); return; }
       let msg; try { msg = JSON.parse(e.data); } catch { return; }
       if (msg.event === "option" && msg.data) handleRollLiveChain(msg.data, msg.received_at_ms);
       if (msg.event === "orderbook" && msg.data) handleRollLiveOrderbook(msg.data, msg.received_at_ms);

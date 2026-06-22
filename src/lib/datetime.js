@@ -1,18 +1,25 @@
 // Date / time helpers — market hours, IST formatting, local-input conversion.
 // Pure functions — no app state.
 
-export function isMarketHours() {
+function marketCloseIST(exchange) {
+  if (exchange === "MCX") return { h: 23, m: 30 };
+  return { h: 15, m: 30 };
+}
+
+export function isMarketHours(exchange) {
   const now = new Date();
   const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
   const h = ist.getHours(), m = ist.getMinutes();
-  return (h < 15 || (h === 15 && m < 30));
+  const close = marketCloseIST(exchange);
+  return (h < close.h || (h === close.h && m < close.m));
 }
 
-export function msUntilMarketClose() {
+export function msUntilMarketClose(exchange) {
   const now = new Date();
   const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
   const close = new Date(ist);
-  close.setHours(15, 30, 0, 0);
+  const { h, m } = marketCloseIST(exchange);
+  close.setHours(h, m, 0, 0);
   return close.getTime() - ist.getTime();
 }
 
