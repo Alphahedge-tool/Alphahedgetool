@@ -16,32 +16,15 @@
   "dependencies": {
     "@kobalte/core": "^0.13.11",
     "@kobalte/utils": "^0.9.1",
-    "@radix-ui/react-dialog": "^1.1.17",
-    "@radix-ui/react-dropdown-menu": "^2.1.18",
-    "@radix-ui/react-popover": "^1.1.17",
-    "@radix-ui/react-select": "^2.3.1",
-    "@radix-ui/react-tabs": "^1.1.15",
-    "@radix-ui/react-tooltip": "^1.2.10",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
     "highcharts": "^13.0.0",
-    "lucide-react": "^1.21.0",
     "plotly.js-dist-min": "^3.6.0",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "shadcn-solid": "^0.7.7",
     "solid-js": "^1.9.5",
-    "tailwind-merge": "^3.6.0",
     "uplot": "^1.6.32",
     "vite": "^5.4.19",
     "vite-plugin-solid": "^2.11.8",
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.1",
-    "@vitejs/plugin-react": "^6.0.2",
-    "electron": "^42.4.1",
-    "postcss": "^8.5.15",
-    "tailwindcss": "^4.3.1"
+    "electron": "^42.4.1"
   }
 }
