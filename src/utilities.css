@@ -1,0 +1,72 @@
+/* Tailwind-equivalent utility classes used across the app */
+.flex { display: flex; }
+.inline-flex { display: inline-flex; }
+.inline-block { display: inline-block; }
+.block { display: block; }
+.grid { display: grid; }
+.hidden { display: none; }
+.relative { position: relative; }
+.absolute { position: absolute; }
+
+.flex-col { flex-direction: column; }
+.flex-row { flex-direction: row; }
+.flex-wrap { flex-wrap: wrap; }
+.flex-1 { flex: 1 1 0%; }
+.grow { flex-grow: 1; }
+.shrink-0 { flex-shrink: 0; }
+
+.items-center { align-items: center; }
+.items-start { align-items: flex-start; }
+.items-end { align-items: flex-end; }
+.justify-between { justify-content: space-between; }
+.justify-center { justify-content: center; }
+.justify-end { justify-content: flex-end; }
+
+.gap-1\.5 { gap: 6px; }
+.gap-2 { gap: 8px; }
+.gap-2\.5 { gap: 10px; }
+.gap-3 { gap: 12px; }
+
+.min-h-0 { min-height: 0; }
+.min-w-0 { min-width: 0; }
+
+.w-full { width: 100%; }
+.w-4 { width: 16px; }
+.w-11 { width: 44px; }
+.w-24 { width: 96px; }
+.w-28 { width: 112px; }
+.w-40 { width: 160px; }
+.h-2 { height: 8px; }
+.h-6 { height: 24px; }
+.h-8 { height: 32px; }
+.max-w-4xl { max-width: 896px; }
+.max-w-5xl { max-width: 1024px; }
+
+.px-3 { padding-left: 12px; padding-right: 12px; }
+.px-5 { padding-left: 20px; padding-right: 20px; }
+.py-2 { padding-top: 8px; padding-bottom: 8px; }
+.py-4 { padding-top: 16px; padding-bottom: 16px; }
+.mt-0 { margin-top: 0; }
+.mt-2 { margin-top: 8px; }
+.mt-auto { margin-top: auto; }
+
+.overflow-hidden { overflow: hidden; }
+.overflow-x-auto { overflow-x: auto; }
+
+.rounded-sm { border-radius: 2px; }
+.border { border-width: 1px; }
+
+.font-medium { font-weight: 500; }
+.font-semibold { font-weight: 600; }
+.font-bold { font-weight: 700; }
+
+.text-\[10px\] { font-size: 10px; }
+.text-\[11px\] { font-size: 11px; }
+
+.opacity-60 { opacity: 0.6; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.line-through { text-decoration: line-through; }
+.cursor-pointer { cursor: pointer; }
+.select-none { user-select: none; }
+
+.bg-black { background-color: #000; }

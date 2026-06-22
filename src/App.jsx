@@ -44,6 +44,7 @@ import { MarketView } from "./views/MarketView.jsx";
 import { ChainView } from "./views/ChainView.jsx";
 
 import "./styles.css";
+import "./utilities.css";
 import "./typography.css";
 import "./shell.css";
 import "./rolling.css";
