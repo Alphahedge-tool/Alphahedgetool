@@ -12,6 +12,7 @@ export function RollingView() {
     rollStats, rollStatus, rollDrawnLines, rollWindowMode, rollSeriesVisibility,
     removeRollLine, rollLineColor, setRollChartWindowMode, toggleRollSeries,
     registerRollChartHost,
+    straddleMonitor, setStraddleMonitor, straddleAlerts,
   } = useApp();
 
   return (
@@ -48,6 +49,33 @@ export function RollingView() {
             <span class="sidebar-label">Status</span>
             <span class="sidebar-status-value">{rollStatus()}</span>
           </div>
+          <div class="sidebar-divider" />
+          <div class="sidebar-metric" style="padding:6px 4px">
+            <span class="sidebar-label">Monitor</span>
+            <button
+              style={`font-size:10px;padding:3px 8px;border-radius:4px;border:1px solid ${straddleMonitor() ? "#22c55e" : "rgba(255,255,255,0.15)"};background:${straddleMonitor() ? "rgba(34,197,94,0.15)" : "transparent"};color:${straddleMonitor() ? "#22c55e" : "var(--tx-3)"};cursor:pointer`}
+              onClick={() => {
+                setStraddleMonitor(!straddleMonitor());
+                if (!straddleMonitor() === false && typeof Notification !== "undefined" && Notification.permission === "default") Notification.requestPermission();
+              }}
+            >
+              {straddleMonitor() ? "ON" : "OFF"}
+            </button>
+          </div>
+          <Show when={straddleAlerts().length}>
+            <div class="sidebar-divider" />
+            <div style="padding:4px;max-height:120px;overflow-y:auto">
+              <span class="sidebar-label">Alerts</span>
+              <For each={straddleAlerts().slice(0, 5)}>
+                {(a) => (
+                  <div style="font-size:9px;color:var(--tx-3);padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+                    <span style="color:#f59e0b;font-weight:700">{a.title}</span>
+                    <br />{a.body}
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
           <Show when={rollDrawnLines().length}>
             <div class="sidebar-divider" />
             <div class="line-list">

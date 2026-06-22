@@ -422,6 +422,87 @@ function App() {
   const [rollExpiries, setRollExpiries] = createSignal([]);
   const [rollStart, setRollStart] = createSignal(toLocalInput(todayAt(9, 15)));
   const [rollEnd, setRollEnd] = createSignal(toLocalInput(todayAt(15, 30)));
+  // ── Straddle Monitor Engine ──
+  const [straddleMonitor, setStraddleMonitor] = createSignal(false);
+  const [straddleAlerts, setStraddleAlerts] = createSignal([]);
+  let monitorState = null;
+
+  function resetMonitorState() {
+    monitorState = {
+      sessionLowMid: Infinity,
+      sessionLowIv: Infinity,
+      lastAlertMid: 0,
+      lastAlertIv: 0,
+      stallStart: null,
+      stallMid: null,
+      stallThreshold: 2,
+      stallMinutes: 5,
+      bounceThreshold: 3,
+      cooldownMs: 60000,
+      lastNewLowTs: 0,
+      lastStallTs: 0,
+      lastBounceTs: 0,
+    };
+  }
+
+  function sendAlert(title, body) {
+    const ts = Date.now();
+    setStraddleAlerts((prev) => [{ title, body, ts }, ...prev].slice(0, 50));
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      new Notification(title, { body, silent: false });
+    } else if (typeof Notification !== "undefined" && Notification.permission !== "denied") {
+      Notification.requestPermission().then((p) => { if (p === "granted") new Notification(title, { body, silent: false }); });
+    }
+    if (window.electronAPI?.notify) window.electronAPI.notify(title, body);
+  }
+
+  function checkStraddleAlerts(mid, ivMid) {
+    if (!monitorState || !straddleMonitor()) return;
+    const now = Date.now();
+
+    // New session low — straddle mid
+    if (mid < monitorState.sessionLowMid) {
+      monitorState.sessionLowMid = mid;
+      if (now - monitorState.lastNewLowTs > monitorState.cooldownMs) {
+        monitorState.lastNewLowTs = now;
+        sendAlert("New Straddle Low", `Straddle mid hit new low: ₹${mid.toFixed(2)}`);
+      }
+    }
+
+    // New session low — IV
+    if (ivMid != null && Number.isFinite(ivMid) && ivMid < monitorState.sessionLowIv) {
+      monitorState.sessionLowIv = ivMid;
+      if (now - monitorState.lastAlertIv > monitorState.cooldownMs) {
+        monitorState.lastAlertIv = now;
+        sendAlert("New IV Low", `IV mid hit new low: ${ivMid.toFixed(2)}%`);
+      }
+    }
+
+    // Stall detection — mid barely moves for N minutes
+    if (monitorState.stallMid == null) {
+      monitorState.stallMid = mid;
+      monitorState.stallStart = now;
+    } else if (Math.abs(mid - monitorState.stallMid) > monitorState.stallThreshold) {
+      monitorState.stallMid = mid;
+      monitorState.stallStart = now;
+    } else if (now - monitorState.stallStart > monitorState.stallMinutes * 60000) {
+      if (now - monitorState.lastStallTs > monitorState.cooldownMs * 3) {
+        monitorState.lastStallTs = now;
+        sendAlert("Straddle Stall", `Straddle stuck near ₹${mid.toFixed(2)} for ${monitorState.stallMinutes}+ min`);
+      }
+      monitorState.stallStart = now;
+    }
+
+    // Bounce off low
+    if (mid - monitorState.sessionLowMid >= monitorState.bounceThreshold) {
+      if (now - monitorState.lastBounceTs > monitorState.cooldownMs * 2) {
+        monitorState.lastBounceTs = now;
+        const pts = (mid - monitorState.sessionLowMid).toFixed(2);
+        sendAlert("Straddle Bounce", `Straddle bounced ₹${pts} off low (₹${monitorState.sessionLowMid.toFixed(2)} → ₹${mid.toFixed(2)})`);
+      }
+    }
+  }
+
   const [rollStatus, setRollStatus] = createSignal("Idle");
   const [rollStats, setRollStats] = createSignal({
     spot: "--",
@@ -3315,6 +3396,8 @@ function App() {
       return;
     }
 
+    checkStraddleAlerts(best.mid, best.ivMid);
+
     const time = tvTime(receivedAtMs);
     animateRollChartSnapshot(time, best, () => {
       setRollChartLines(
@@ -3399,6 +3482,7 @@ function App() {
   }
 
   function startRollLive() {
+    resetMonitorState();
     if (rollCutoffTimer) { clearTimeout(rollCutoffTimer); rollCutoffTimer = null; }
     if (rollLiveSocket) { rollLiveSocket.close(); rollLiveSocket = null; }
     if (!isMarketHours()) { setRollStatus("Market closed (after 3:30 PM)"); return; }
@@ -5007,6 +5091,7 @@ function App() {
     // actions
     run, loadOiTsSeries, startChainLive, stopChainLive, loadIvTermStructure, loadOptionChain,
     loadChainSearchRows, removeRollLine, toggleRollSeries,
+    straddleMonitor, setStraddleMonitor, straddleAlerts, setStraddleAlerts,
     loadOieExpiries, loadOie, loadSpotPrice, loadPriceChart, loadOptionChainExpiries,
   };
 
