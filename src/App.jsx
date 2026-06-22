@@ -503,6 +503,154 @@ function App() {
     }
   }
 
+  // ── Chain Monitor Engine ──
+  const [chainMonitor, setChainMonitor] = createSignal(false);
+  const [chainAlerts, setChainAlerts] = createSignal([]);
+  let chainMonitorState = null;
+
+  function resetChainMonitor() {
+    chainMonitorState = {
+      prevOiByStrike: new Map(),
+      prevTotalCeOi: 0,
+      prevTotalPeOi: 0,
+      tickCount: 0,
+      cooldownMs: 45000,
+      lastAlertTs: {},
+      oiChangeThresholdPct: 10,
+      heavyOiThresholdPct: 15,
+    };
+  }
+
+  function sendChainAlert(key, title, body) {
+    const now = Date.now();
+    if (!chainMonitorState) return;
+    const last = chainMonitorState.lastAlertTs[key] || 0;
+    if (now - last < chainMonitorState.cooldownMs) return;
+    chainMonitorState.lastAlertTs[key] = now;
+    setChainAlerts((prev) => [{ title, body, ts: now }, ...prev].slice(0, 80));
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      new Notification(title, { body, silent: false });
+    } else if (typeof Notification !== "undefined" && Notification.permission !== "denied") {
+      Notification.requestPermission().then((p) => { if (p === "granted") new Notification(title, { body, silent: false }); });
+    }
+  }
+
+  function analyzeChainTick(chain) {
+    if (!chainMonitor() || !chainMonitorState || !chain) return;
+    const ce = Array.isArray(chain.ce) ? chain.ce : [];
+    const pe = Array.isArray(chain.pe) ? chain.pe : [];
+    if (!ce.length && !pe.length) return;
+
+    chainMonitorState.tickCount += 1;
+    if (chainMonitorState.tickCount < 3) {
+      for (const leg of [...ce, ...pe]) {
+        const sp = Number(leg.sp ?? leg.strike_price ?? leg.strike);
+        const side = ce.includes(leg) ? "CE" : "PE";
+        const oi = Number(leg.oi ?? leg.open_interest ?? 0);
+        if (Number.isFinite(sp) && Number.isFinite(oi)) chainMonitorState.prevOiByStrike.set(`${sp}|${side}`, oi);
+      }
+      chainMonitorState.prevTotalCeOi = ce.reduce((s, l) => s + (Number(l.oi ?? l.open_interest) || 0), 0);
+      chainMonitorState.prevTotalPeOi = pe.reduce((s, l) => s + (Number(l.oi ?? l.open_interest) || 0), 0);
+      return;
+    }
+
+    const fmt = (v) => {
+      if (v >= 10000000) return `${(v / 10000000).toFixed(2)}Cr`;
+      if (v >= 100000) return `${(v / 100000).toFixed(1)}L`;
+      if (v >= 1000) return `${(v / 1000).toFixed(1)}K`;
+      return String(Math.round(v));
+    };
+    const fmtStrike = (sp) => chainStrikeInRupees(sp, chain) ?? number.format(sp);
+
+    const totalCeOi = ce.reduce((s, l) => s + (Number(l.oi ?? l.open_interest) || 0), 0);
+    const totalPeOi = pe.reduce((s, l) => s + (Number(l.oi ?? l.open_interest) || 0), 0);
+
+    // Per-strike OI change detection
+    const bigChanges = [];
+    for (const leg of [...ce, ...pe]) {
+      const sp = Number(leg.sp ?? leg.strike_price ?? leg.strike);
+      const side = ce.includes(leg) ? "CE" : "PE";
+      const oi = Number(leg.oi ?? leg.open_interest ?? 0);
+      const key = `${sp}|${side}`;
+      const prev = chainMonitorState.prevOiByStrike.get(key) || 0;
+      if (Number.isFinite(sp) && Number.isFinite(oi)) chainMonitorState.prevOiByStrike.set(key, oi);
+      if (prev > 0 && oi > 0) {
+        const chgPct = ((oi - prev) / prev) * 100;
+        if (Math.abs(chgPct) >= chainMonitorState.oiChangeThresholdPct) {
+          bigChanges.push({ sp, side, oi, prev, chgPct });
+        }
+      }
+    }
+
+    // Alert: significant OI addition at a strike
+    const additions = bigChanges.filter((c) => c.chgPct > 0).sort((a, b) => b.chgPct - a.chgPct);
+    if (additions.length) {
+      const top = additions[0];
+      sendChainAlert(`oi-add-${top.sp}-${top.side}`,
+        `OI Addition: ${fmtStrike(top.sp)} ${top.side}`,
+        `+${top.chgPct.toFixed(1)}% OI (${fmt(top.prev)} → ${fmt(top.oi)})`
+      );
+    }
+
+    // Alert: significant OI unwinding at a strike
+    const unwinds = bigChanges.filter((c) => c.chgPct < 0).sort((a, b) => a.chgPct - b.chgPct);
+    if (unwinds.length) {
+      const top = unwinds[0];
+      sendChainAlert(`oi-unwind-${top.sp}-${top.side}`,
+        `OI Unwinding: ${fmtStrike(top.sp)} ${top.side}`,
+        `${top.chgPct.toFixed(1)}% OI (${fmt(top.prev)} → ${fmt(top.oi)})`
+      );
+    }
+
+    // Alert: heaviest OI strike (CE and PE separately)
+    let maxCe = null, maxPe = null;
+    for (const leg of ce) {
+      const oi = Number(leg.oi ?? leg.open_interest ?? 0);
+      if (!maxCe || oi > maxCe.oi) maxCe = { sp: Number(leg.sp ?? leg.strike_price ?? leg.strike), oi };
+    }
+    for (const leg of pe) {
+      const oi = Number(leg.oi ?? leg.open_interest ?? 0);
+      if (!maxPe || oi > maxPe.oi) maxPe = { sp: Number(leg.sp ?? leg.strike_price ?? leg.strike), oi };
+    }
+
+    // Alert: PCR shift (total PE OI / total CE OI)
+    if (totalCeOi > 0 && chainMonitorState.prevTotalCeOi > 0) {
+      const pcr = totalPeOi / totalCeOi;
+      const prevPcr = chainMonitorState.prevTotalPeOi / chainMonitorState.prevTotalCeOi;
+      const pcrShift = Math.abs(pcr - prevPcr);
+      if (pcrShift >= 0.08) {
+        const dir = pcr > prevPcr ? "Bullish" : "Bearish";
+        sendChainAlert("pcr-shift",
+          `PCR Shift: ${dir}`,
+          `PCR ${prevPcr.toFixed(2)} → ${pcr.toFixed(2)} (PE OI: ${fmt(totalPeOi)}, CE OI: ${fmt(totalCeOi)})`
+        );
+      }
+    }
+
+    // Alert: heavy OI concentration (one strike has >N% of total OI on that side)
+    if (maxCe && totalCeOi > 0) {
+      const pct = (maxCe.oi / totalCeOi) * 100;
+      if (pct >= chainMonitorState.heavyOiThresholdPct) {
+        sendChainAlert(`heavy-ce-${maxCe.sp}`,
+          `Heavy CE OI: ${fmtStrike(maxCe.sp)}`,
+          `${pct.toFixed(1)}% of total CE OI (${fmt(maxCe.oi)} / ${fmt(totalCeOi)})`
+        );
+      }
+    }
+    if (maxPe && totalPeOi > 0) {
+      const pct = (maxPe.oi / totalPeOi) * 100;
+      if (pct >= chainMonitorState.heavyOiThresholdPct) {
+        sendChainAlert(`heavy-pe-${maxPe.sp}`,
+          `Heavy PE OI: ${fmtStrike(maxPe.sp)}`,
+          `${pct.toFixed(1)}% of total PE OI (${fmt(maxPe.oi)} / ${fmt(totalPeOi)})`
+        );
+      }
+    }
+
+    chainMonitorState.prevTotalCeOi = totalCeOi;
+    chainMonitorState.prevTotalPeOi = totalPeOi;
+  }
+
   const [rollStatus, setRollStatus] = createSignal("Idle");
   const [rollStats, setRollStats] = createSignal({
     spot: "--",
@@ -2972,12 +3120,14 @@ function App() {
     if (!next) return;
     const rowCount = chainRowCount(next);
     if (!rowCount) return;
+    analyzeChainTick(next);
     setChainData(next);
     if (next.expiry) setChainExpiry(String(next.expiry));
     setChainStatus(`Live · ${rowCount} strikes`);
   }
 
   function startChainLive() {
+    resetChainMonitor();
     if (chainCutoffTimer) { clearTimeout(chainCutoffTimer); chainCutoffTimer = null; }
     if (chainLiveSocket) { chainLiveSocket.close(); chainLiveSocket = null; }
     const _chainExch = chainExchange();
@@ -5094,6 +5244,7 @@ function App() {
     run, loadOiTsSeries, startChainLive, stopChainLive, loadIvTermStructure, loadOptionChain,
     loadChainSearchRows, removeRollLine, toggleRollSeries,
     straddleMonitor, setStraddleMonitor, straddleAlerts, setStraddleAlerts,
+    chainMonitor, setChainMonitor, chainAlerts, setChainAlerts,
     loadOieExpiries, loadOie, loadSpotPrice, loadPriceChart, loadOptionChainExpiries,
   };
 
