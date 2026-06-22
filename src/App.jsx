@@ -3549,7 +3549,7 @@ function App() {
     rollIvSeries = addLine({
       color: "#22d3ee",
       lineWidth: 1,
-      lineStyle: 2,           // dashed
+      lineStyle: 0,           // solid
       title: "IV %",
       priceScaleId: "left",
       priceFormat: { type: "custom", formatter: (p) => `${p.toFixed(1)}%`, minMove: 0.01 }
@@ -3563,7 +3563,7 @@ function App() {
       {},
       { label: "Bid", scale: "price", show: rollSeriesVisibility().bid, stroke: "#21d19f", width: 1.6, points: { show: false } },
       { label: "Ask", scale: "price", show: rollSeriesVisibility().ask, stroke: "#ffb15c", width: 1.6, points: { show: false } },
-      { label: "IV %", scale: "iv", show: rollSeriesVisibility().iv, stroke: "#22d3ee", width: 1, dash: [5, 4], points: { show: false } }
+      { label: "IV %", scale: "iv", show: rollSeriesVisibility().iv, stroke: "#22d3ee", width: 1.2, points: { show: false } }
     ];
     for (const line of rollDrawnLines()) {
       base.push({
@@ -4065,6 +4065,62 @@ function App() {
     };
   }
 
+  function createRollCursorAxisPlugin() {
+    let priceLabel, ivLabel;
+    function makeAxisLabel(color) {
+      const el = document.createElement("div");
+      el.className = "roll-cursor-axis-label";
+      el.style.borderColor = color;
+      el.style.color = color;
+      el.hidden = true;
+      return el;
+    }
+    return {
+      hooks: {
+        init: [(u) => {
+          const wrap = u.root.querySelector(".u-wrap") || u.root;
+          priceLabel = makeAxisLabel("#c9cdd3");
+          ivLabel = makeAxisLabel("#22d3ee");
+          wrap.appendChild(priceLabel);
+          wrap.appendChild(ivLabel);
+        }],
+        setCursor: [(u) => {
+          if (!priceLabel || !ivLabel) return;
+          const top = u.cursor.top;
+          if (top == null || top < 0) {
+            priceLabel.hidden = true;
+            ivLabel.hidden = true;
+            return;
+          }
+          const priceScale = u.scales.price;
+          if (priceScale && Number.isFinite(priceScale.min) && Number.isFinite(priceScale.max)) {
+            const val = u.posToVal(top, "price");
+            priceLabel.textContent = `₹${Number(val).toFixed(2)}`;
+            priceLabel.hidden = false;
+            priceLabel.style.top = `${top}px`;
+            priceLabel.style.right = "0px";
+            priceLabel.style.left = "";
+            priceLabel.style.transform = "translateY(-50%)";
+          } else {
+            priceLabel.hidden = true;
+          }
+          const ivScale = u.scales.iv;
+          if (ivScale && Number.isFinite(ivScale.min) && Number.isFinite(ivScale.max)) {
+            const val = u.posToVal(top, "iv");
+            ivLabel.textContent = `${Number(val).toFixed(2)}%`;
+            ivLabel.hidden = false;
+            ivLabel.style.top = `${top}px`;
+            ivLabel.style.left = "0px";
+            ivLabel.style.right = "";
+            ivLabel.style.transform = "translateY(-50%)";
+          } else {
+            ivLabel.hidden = true;
+          }
+        }]
+      }
+    };
+  }
+
   function initRollChart() {
     if (rollChart || !rollChartHost) return;
     const rect = rollChartHost.getBoundingClientRect();
@@ -4136,7 +4192,7 @@ function App() {
         }
       ],
       series,
-      plugins: [createRollInteractionPlugin(), createRollTooltipPlugin(), createRollLastValuePlugin()]
+      plugins: [createRollInteractionPlugin(), createRollTooltipPlugin(), createRollLastValuePlugin(), createRollCursorAxisPlugin()]
     }, rollChartData, rollChartHost);
     rollBidSeries = rollAskSeries = rollIvSeries = null;
     queueChartResize();
