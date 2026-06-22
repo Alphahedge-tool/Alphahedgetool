@@ -208,7 +208,15 @@ export function OiTimeSeriesView() {
         if (t >= windowStart && t <= windowEnd) allTs.add(t);
       }
     }
-    const tArr = [...allTs].filter(Number.isFinite).sort((a, b) => a - b);
+    const IST_MS = (5 * 60 + 30) * 60000;
+    const isMarketTime = (ms) => {
+      const utc = ms + IST_MS;
+      const hh = Math.floor((utc % 86400000) / 3600000);
+      const mm = Math.floor((utc % 3600000) / 60000);
+      const mins = hh * 60 + mm;
+      return mins >= 555 && mins <= 930; // 9:15 AM to 3:30 PM IST
+    };
+    const tArr = [...allTs].filter((t) => Number.isFinite(t) && isMarketTime(t)).sort((a, b) => a - b);
     if (!tArr.length) return null;
     // uPlot x-axis needs unix seconds
     const tsSeconds = tArr.map((t) => t / 1000);
@@ -239,7 +247,7 @@ export function OiTimeSeriesView() {
         label: number.format(k),
         stroke: oiTsColor(i, strikes.length),
         width: 2,
-        spanGaps: false,
+        spanGaps: true,
         points: { show: true, size: 4 },
         value: (_u, value) => value == null ? "--" : compactNumber.format(value),
       });
