@@ -143,7 +143,7 @@ export function OiTimeSeriesView() {
     };
   }
 
-  function createOiTsTooltipPlugin(strikes) {
+  function createOiTsTooltipPlugin(strikes, realMs) {
     let tooltip = null;
     return {
       hooks: {
@@ -171,8 +171,8 @@ export function OiTimeSeriesView() {
               nearest = { seriesIndex, value, distance, y };
             }
           }
-          const time = u.data[0]?.[idx];
-          if (!nearest || !Number.isFinite(time)) {
+          const realTime = realMs?.[idx];
+          if (!nearest || !Number.isFinite(realTime)) {
             tooltip.hidden = true;
             return;
           }
@@ -181,7 +181,7 @@ export function OiTimeSeriesView() {
           const color = u.series[nearest.seriesIndex]?.stroke || "#8c8ca0";
           tooltip.style.setProperty("--oi-tip-color", color);
           tooltip.innerHTML = `
-            <span class="oi-ts-tip-time">${formatIstTime(time)} IST</span>
+            <span class="oi-ts-tip-time">${formatIstTime(realTime)} IST</span>
             <span class="oi-ts-tip-strike"><i></i>Strike ${number.format(strike)}</span>
             <span class="oi-ts-tip-value">Total OI <strong>${compactNumber.format(nearest.value)}</strong></span>
           `;
@@ -208,18 +208,19 @@ export function OiTimeSeriesView() {
         if (t >= windowStart && t <= windowEnd) allTs.add(t);
       }
     }
-    const IST_MS = (5 * 60 + 30) * 60000;
     const isMarketTime = (ms) => {
-      const utc = ms + IST_MS;
-      const hh = Math.floor((utc % 86400000) / 3600000);
-      const mm = Math.floor((utc % 3600000) / 60000);
-      const mins = hh * 60 + mm;
-      return mins >= 555 && mins <= 930; // 9:15 AM to 3:30 PM IST
+      const d = new Date(ms);
+      const istH = (d.getUTCHours() + 5 + Math.floor((d.getUTCMinutes() + 30) / 60)) % 24;
+      const istM = (d.getUTCMinutes() + 30) % 60;
+      const mins = istH * 60 + istM;
+      return mins >= 555 && mins <= 930;
     };
     const tArr = [...allTs].filter((t) => Number.isFinite(t) && isMarketTime(t)).sort((a, b) => a - b);
     if (!tArr.length) return null;
-    // uPlot x-axis needs unix seconds
-    const tsSeconds = tArr.map((t) => t / 1000);
+    // Use sequential indices as X so overnight gaps collapse.
+    // Store real timestamps in a lookup for axis labels and tooltips.
+    const tsSeconds = tArr.map((_t, i) => i);
+    const tsRealMs = tArr;
     const uData = [new Float64Array(tsSeconds)];
     const series = [{ label: "Time" }];
     for (let i = 0; i < strikes.length; i++) {
@@ -255,34 +256,31 @@ export function OiTimeSeriesView() {
     const width  = w || host.clientWidth  || 800;
     const height = h || host.clientHeight || 340;
 
-    // IST offset = UTC+5:30 = 19800 seconds
     const IST_OFFSET = 19800;
-    const fmtIST = (_, secs) => {
-      const d = new Date((secs + IST_OFFSET) * 1000);
-      const hh = String(d.getUTCHours()).padStart(2, "0");
-      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+    const spansDays = tArr.length > 1 && (tsRealMs[tsRealMs.length - 1] - tsRealMs[0]) >= 86400000;
+    const idxToLabel = (idx) => {
+      const i = Math.round(idx);
+      if (i < 0 || i >= tsRealMs.length) return "";
+      const d = new Date(tsRealMs[i]);
+      const istD = new Date(d.getTime() + IST_OFFSET * 1000);
+      const hh = String(istD.getUTCHours()).padStart(2, "0");
+      const mm = String(istD.getUTCMinutes()).padStart(2, "0");
+      if (spansDays) return `${istD.getUTCDate()}/${istD.getUTCMonth() + 1} ${hh}:${mm}`;
       return `${hh}:${mm}`;
-    };
-    const fmtISTDate = (_, secs) => {
-      const d = new Date((secs + IST_OFFSET) * 1000);
-      return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
     };
 
     const opts = {
       width, height,
       cursor: { show: true, sync: {}, drag: { x: false, y: false } },
       legend: { show: false },
-      scales: { x: { time: true }, y: { auto: true } },
+      scales: { x: { time: false }, y: { auto: true } },
       axes: [
         {
           stroke: "#8c8ca0",
           ticks: { stroke: "rgba(255,255,255,0.1)", size: 4 },
           grid: { stroke: "rgba(255,255,255,0.06)" },
           font: "10px system-ui",
-          values: (u, splits) => splits.map((s) => {
-            const spansDays = tArr.length > 1 && (tArr[tArr.length - 1] - tArr[0]) >= 86400000;
-            return spansDays ? `${fmtISTDate(u, s)} ${fmtIST(u, s)}` : fmtIST(u, s);
-          }),
+          values: (_u, splits) => splits.map(idxToLabel),
           space: 60,
         },
         {
@@ -296,7 +294,7 @@ export function OiTimeSeriesView() {
       ],
       series,
       hooks: { drawAxes: [] },
-      plugins: [createOiTsInteractionPlugin(tsSeconds), createOiTsTooltipPlugin(strikes)],
+      plugins: [createOiTsInteractionPlugin(tsSeconds), createOiTsTooltipPlugin(strikes, tsRealMs)],
     };
     return new uPlot(opts, uData, host);
   }
