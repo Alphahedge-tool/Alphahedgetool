@@ -3233,7 +3233,7 @@ function App() {
     };
     const baseData = rollChartData.map((series) => series.slice());
     const started = performance.now();
-    const duration = 620;
+    const duration = 200;
 
     if (rollLiveContext.frames.live) cancelAnimationFrame(rollLiveContext.frames.live);
 
@@ -3357,7 +3357,7 @@ function App() {
       rollLiveFlushTimer = null;
       if (!isMarketHours()) { stopRollLive(); setRollStatus("Market closed (after 3:30 PM)"); return; }
       updateRollLiveSnapshot(receivedAtMs || Date.now());
-    }, 1000);
+    }, 250);
   }
 
   function handleRollLiveChain(chain, receivedAtMs) {
