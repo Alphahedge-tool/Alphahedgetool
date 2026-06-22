@@ -109,7 +109,7 @@ export function RollingView() {
                 title={rollSeriesVisibility().iv ? "Mute IV series" : "Show IV series"}
                 onClick={() => toggleRollSeries("iv", 3)}
               >
-                <span class="inline-block h-px w-4" style="background:#22d3ee;border-top:2px dashed #22d3ee"></span>
+                <span class="inline-block h-px w-4" style="background:#22d3ee;border-top:2px solid #22d3ee"></span>
                 <span style="color:var(--text-muted)">IV % (left)</span>
               </button>
             </div>
