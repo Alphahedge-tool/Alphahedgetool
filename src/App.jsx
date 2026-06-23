@@ -510,14 +510,25 @@ function App() {
 
   function resetChainMonitor() {
     chainMonitorState = {
-      prevOiByStrike: new Map(),
+      prevOiByStrike: new Map(),    // "sp|side" → oi
+      prevIvByStrike: new Map(),    // "sp|side" → iv
+      prevLtpByStrike: new Map(),   // "sp|side" → ltp
       prevTotalCeOi: 0,
       prevTotalPeOi: 0,
+      prevAtm: null,
+      prevCallWall: null,
+      prevPutWall: null,
+      prevAtmStraddleOi: 0,
+      prevAtmIvSkew: null,
       tickCount: 0,
       cooldownMs: 45000,
       lastAlertTs: {},
-      oiChangeThresholdPct: 10,
-      heavyOiThresholdPct: 15,
+      oiChangeThresholdPct: 8,    // % OI change to flag
+      oiAbsSpikeThreshold: 50000, // absolute OI units to flag regardless of %
+      pcrShiftThreshold: 0.08,
+      atmRange: 5,                // ATM ± 5 strikes
+      atmStraddleSpikeThreshold: 12, // % spike in ATM straddle OI
+      ivSkewShiftThreshold: 1.5,  // pp shift in CE-PE IV skew at ATM
     };
   }
 
@@ -541,19 +552,7 @@ function App() {
     const pe = Array.isArray(chain.pe) ? chain.pe : [];
     if (!ce.length && !pe.length) return;
 
-    chainMonitorState.tickCount += 1;
-    if (chainMonitorState.tickCount < 3) {
-      for (const leg of [...ce, ...pe]) {
-        const sp = Number(leg.sp ?? leg.strike_price ?? leg.strike);
-        const side = ce.includes(leg) ? "CE" : "PE";
-        const oi = Number(leg.oi ?? leg.open_interest ?? 0);
-        if (Number.isFinite(sp) && Number.isFinite(oi)) chainMonitorState.prevOiByStrike.set(`${sp}|${side}`, oi);
-      }
-      chainMonitorState.prevTotalCeOi = ce.reduce((s, l) => s + (Number(l.oi ?? l.open_interest) || 0), 0);
-      chainMonitorState.prevTotalPeOi = pe.reduce((s, l) => s + (Number(l.oi ?? l.open_interest) || 0), 0);
-      return;
-    }
-
+    const rn = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
     const fmt = (v) => {
       if (v >= 10000000) return `${(v / 10000000).toFixed(2)}Cr`;
       if (v >= 100000) return `${(v / 100000).toFixed(1)}L`;
@@ -562,91 +561,222 @@ function App() {
     };
     const fmtStrike = (sp) => chainStrikeInRupees(sp, chain) ?? number.format(sp);
 
-    const totalCeOi = ce.reduce((s, l) => s + (Number(l.oi ?? l.open_interest) || 0), 0);
-    const totalPeOi = pe.reduce((s, l) => s + (Number(l.oi ?? l.open_interest) || 0), 0);
+    // ── Spot & ATM ──────────────────────────────────────────────
+    const spot = rn(toRupees(chain.current_price ?? chain.cp)) ?? chainMonitorState.prevSpot;
+    if (spot && spot > 0) chainMonitorState.prevSpot = spot;
 
-    // Per-strike OI change detection
-    const bigChanges = [];
-    for (const leg of [...ce, ...pe]) {
-      const sp = Number(leg.sp ?? leg.strike_price ?? leg.strike);
-      const side = ce.includes(leg) ? "CE" : "PE";
-      const oi = Number(leg.oi ?? leg.open_interest ?? 0);
-      const key = `${sp}|${side}`;
-      const prev = chainMonitorState.prevOiByStrike.get(key) || 0;
-      if (Number.isFinite(sp) && Number.isFinite(oi)) chainMonitorState.prevOiByStrike.set(key, oi);
-      if (prev > 0 && oi > 0) {
-        const chgPct = ((oi - prev) / prev) * 100;
-        if (Math.abs(chgPct) >= chainMonitorState.oiChangeThresholdPct) {
-          bigChanges.push({ sp, side, oi, prev, chgPct });
-        }
+    const allStrikes = [...new Set([...ce, ...pe]
+      .map((l) => rn(l.sp ?? l.strike_price ?? l.strike))
+      .filter(Boolean)
+    )].sort((a, b) => a - b);
+
+    const step = allStrikes.length >= 2
+      ? allStrikes.reduce((mn, s, i) => i > 0 ? Math.min(mn, s - allStrikes[i - 1]) : mn, Infinity)
+      : 50;
+
+    const atm = spot && allStrikes.length
+      ? allStrikes.reduce((best, s) => Math.abs(s - spot) < Math.abs(best - spot) ? s : best, allStrikes[0])
+      : null;
+
+    // Near-ATM set: ATM ± atmRange strikes
+    const nearAtmSet = new Set();
+    if (atm) {
+      for (let i = -chainMonitorState.atmRange; i <= chainMonitorState.atmRange; i++) {
+        nearAtmSet.add(atm + i * step);
       }
     }
 
-    // Alert: significant OI addition at a strike
-    const additions = bigChanges.filter((c) => c.chgPct > 0).sort((a, b) => b.chgPct - a.chgPct);
-    if (additions.length) {
-      const top = additions[0];
-      sendChainAlert(`oi-add-${top.sp}-${top.side}`,
-        `OI Addition: ${fmtStrike(top.sp)} ${top.side}`,
-        `+${top.chgPct.toFixed(1)}% OI (${fmt(top.prev)} → ${fmt(top.oi)})`
-      );
-    }
-
-    // Alert: significant OI unwinding at a strike
-    const unwinds = bigChanges.filter((c) => c.chgPct < 0).sort((a, b) => a.chgPct - b.chgPct);
-    if (unwinds.length) {
-      const top = unwinds[0];
-      sendChainAlert(`oi-unwind-${top.sp}-${top.side}`,
-        `OI Unwinding: ${fmtStrike(top.sp)} ${top.side}`,
-        `${top.chgPct.toFixed(1)}% OI (${fmt(top.prev)} → ${fmt(top.oi)})`
-      );
-    }
-
-    // Alert: heaviest OI strike (CE and PE separately)
-    let maxCe = null, maxPe = null;
+    // ── Per-strike snapshot ──────────────────────────────────────
+    const strikeData = [];
     for (const leg of ce) {
-      const oi = Number(leg.oi ?? leg.open_interest ?? 0);
-      if (!maxCe || oi > maxCe.oi) maxCe = { sp: Number(leg.sp ?? leg.strike_price ?? leg.strike), oi };
+      const sp = rn(leg.sp ?? leg.strike_price ?? leg.strike);
+      if (!sp) continue;
+      const key = `${sp}|CE`;
+      const oi  = rn(leg.oi ?? leg.open_interest) ?? 0;
+      const iv  = rn(leg.iv ?? leg.IV ?? leg.implied_volatility);
+      const ltp = rn(toRupees(leg.ltp ?? leg.last_traded_price));
+      strikeData.push({ sp, side: "CE", key, oi, iv, ltp,
+        prevOi:  chainMonitorState.prevOiByStrike.get(key) ?? null,
+        prevIv:  chainMonitorState.prevIvByStrike.get(key) ?? null,
+        prevLtp: chainMonitorState.prevLtpByStrike.get(key) ?? null });
+      chainMonitorState.prevOiByStrike.set(key, oi);
+      if (iv  != null) chainMonitorState.prevIvByStrike.set(key, iv);
+      if (ltp != null) chainMonitorState.prevLtpByStrike.set(key, ltp);
     }
     for (const leg of pe) {
-      const oi = Number(leg.oi ?? leg.open_interest ?? 0);
-      if (!maxPe || oi > maxPe.oi) maxPe = { sp: Number(leg.sp ?? leg.strike_price ?? leg.strike), oi };
+      const sp = rn(leg.sp ?? leg.strike_price ?? leg.strike);
+      if (!sp) continue;
+      const key = `${sp}|PE`;
+      const oi  = rn(leg.oi ?? leg.open_interest) ?? 0;
+      const iv  = rn(leg.iv ?? leg.IV ?? leg.implied_volatility);
+      const ltp = rn(toRupees(leg.ltp ?? leg.last_traded_price));
+      strikeData.push({ sp, side: "PE", key, oi, iv, ltp,
+        prevOi:  chainMonitorState.prevOiByStrike.get(key) ?? null,
+        prevIv:  chainMonitorState.prevIvByStrike.get(key) ?? null,
+        prevLtp: chainMonitorState.prevLtpByStrike.get(key) ?? null });
+      chainMonitorState.prevOiByStrike.set(key, oi);
+      if (iv  != null) chainMonitorState.prevIvByStrike.set(key, iv);
+      if (ltp != null) chainMonitorState.prevLtpByStrike.set(key, ltp);
     }
 
-    // Alert: PCR shift (total PE OI / total CE OI)
+    // Warm-up: collect baseline for first 3 ticks, don't alert
+    chainMonitorState.tickCount += 1;
+    if (chainMonitorState.tickCount < 3) {
+      chainMonitorState.prevAtm = atm;
+      chainMonitorState.prevTotalCeOi = ce.reduce((s, l) => s + (rn(l.oi ?? l.open_interest) ?? 0), 0);
+      chainMonitorState.prevTotalPeOi = pe.reduce((s, l) => s + (rn(l.oi ?? l.open_interest) ?? 0), 0);
+      return;
+    }
+
+    // ── ATM strike shift ─────────────────────────────────────────
+    if (atm && chainMonitorState.prevAtm && atm !== chainMonitorState.prevAtm) {
+      const dist = spot ? `Spot ${rupee.format(spot)}` : "";
+      sendChainAlert("atm-shift",
+        `ATM Shifted → ${fmtStrike(atm)}`,
+        `${fmtStrike(chainMonitorState.prevAtm)} → ${fmtStrike(atm)}${dist ? "  (" + dist + ")" : ""}`
+      );
+    }
+
+    // ── Per-strike OI + IV + LTP analysis (near ATM only) ────────
+    const alerts = [];
+    for (const d of strikeData) {
+      if (!nearAtmSet.has(d.sp)) continue;
+      if (d.prevOi === null || d.prevOi <= 0 || d.oi <= 0) continue;
+
+      const oiChgPct = ((d.oi - d.prevOi) / d.prevOi) * 100;
+      const oiChgAbs = d.oi - d.prevOi;
+      const oiSignificant = Math.abs(oiChgPct) >= chainMonitorState.oiChangeThresholdPct
+                         || Math.abs(oiChgAbs) >= chainMonitorState.oiAbsSpikeThreshold;
+      if (!oiSignificant) continue;
+
+      const oiDir  = d.oi > d.prevOi ? "up" : "down";
+      const ltpDir = (d.ltp != null && d.prevLtp != null)
+        ? (d.ltp > d.prevLtp ? "up" : d.ltp < d.prevLtp ? "down" : "flat") : null;
+      const ivDir  = (d.iv != null && d.prevIv != null)
+        ? (d.iv > d.prevIv ? "up" : d.iv < d.prevIv ? "down" : "flat") : null;
+
+      // OI interpretation using LTP direction
+      let oiSignal = null;
+      if (ltpDir && ltpDir !== "flat") {
+        if      (oiDir === "up"   && ltpDir === "up")   oiSignal = "Long Buildup";
+        else if (oiDir === "up"   && ltpDir === "down")  oiSignal = "Short Buildup";
+        else if (oiDir === "down" && ltpDir === "up")    oiSignal = "Short Covering";
+        else if (oiDir === "down" && ltpDir === "down")  oiSignal = "Long Unwinding";
+      }
+
+      // IV alignment with OI direction
+      let ivSignal = null;
+      if (ivDir && ivDir !== "flat") {
+        if      (oiDir === "up"   && ivDir === "up")    ivSignal = `IV↑${d.iv != null ? " " + d.iv.toFixed(1) + "%" : ""} confirms demand`;
+        else if (oiDir === "up"   && ivDir === "down")  ivSignal = `IV↓${d.iv != null ? " " + d.iv.toFixed(1) + "%" : ""} = writing/selling pressure`;
+        else if (oiDir === "down" && ivDir === "up")    ivSignal = `IV↑${d.iv != null ? " " + d.iv.toFixed(1) + "%" : ""} = short covering`;
+        else if (oiDir === "down" && ivDir === "down")  ivSignal = `IV↓${d.iv != null ? " " + d.iv.toFixed(1) + "%" : ""} = longs exiting`;
+      }
+
+      const distStrikes = atm ? Math.round(Math.abs(d.sp - atm) / step) : null;
+      const atmTag = distStrikes === 0 ? "ATM" : distStrikes != null ? `ATM${d.sp > atm ? "+" : "-"}${distStrikes}` : "";
+
+      alerts.push({ ...d, oiChgPct, oiChgAbs, oiDir, ltpDir, ivDir, oiSignal, ivSignal, atmTag, distStrikes });
+    }
+
+    // Fire top-3 near-ATM OI alerts, sorted by abs % change
+    alerts.sort((a, b) => Math.abs(b.oiChgPct) - Math.abs(a.oiChgPct));
+    for (const c of alerts.slice(0, 3)) {
+      const action = c.oiDir === "up" ? "OI Added" : "OI Unwound";
+      const title = `${action}: ${c.atmTag ? c.atmTag + " " : ""}${fmtStrike(c.sp)} ${c.side}`;
+      const parts = [
+        `${c.oiChgPct > 0 ? "+" : ""}${c.oiChgPct.toFixed(1)}% (${fmt(c.prevOi)} → ${fmt(c.oi)})`,
+        c.oiSignal,
+        c.ivSignal,
+      ].filter(Boolean);
+      sendChainAlert(`oi-${c.sp}-${c.side}`, title, parts.join(" · "));
+    }
+
+    // ── Totals ────────────────────────────────────────────────────
+    let totalCeOi = 0, totalPeOi = 0;
+    let maxCeStrike = null, maxCeOi = 0;
+    let maxPeStrike = null, maxPeOi = 0;
+    for (const leg of ce) {
+      const sp = rn(leg.sp ?? leg.strike_price ?? leg.strike);
+      const oi = rn(leg.oi ?? leg.open_interest) ?? 0;
+      totalCeOi += oi;
+      if (oi > maxCeOi) { maxCeOi = oi; maxCeStrike = sp; }
+    }
+    for (const leg of pe) {
+      const sp = rn(leg.sp ?? leg.strike_price ?? leg.strike);
+      const oi = rn(leg.oi ?? leg.open_interest) ?? 0;
+      totalPeOi += oi;
+      if (oi > maxPeOi) { maxPeOi = oi; maxPeStrike = sp; }
+    }
+
+    // ── Call Wall / Put Wall shift ────────────────────────────────
+    if (maxCeStrike && chainMonitorState.prevCallWall && maxCeStrike !== chainMonitorState.prevCallWall) {
+      sendChainAlert("call-wall-shift",
+        `Call Wall Shifted → ${fmtStrike(maxCeStrike)}`,
+        `${fmtStrike(chainMonitorState.prevCallWall)} → ${fmtStrike(maxCeStrike)} · Max CE OI: ${fmt(maxCeOi)}`
+      );
+    }
+    if (maxPeStrike && chainMonitorState.prevPutWall && maxPeStrike !== chainMonitorState.prevPutWall) {
+      sendChainAlert("put-wall-shift",
+        `Put Wall Shifted → ${fmtStrike(maxPeStrike)}`,
+        `${fmtStrike(chainMonitorState.prevPutWall)} → ${fmtStrike(maxPeStrike)} · Max PE OI: ${fmt(maxPeOi)}`
+      );
+    }
+
+    // ── PCR shift ─────────────────────────────────────────────────
     if (totalCeOi > 0 && chainMonitorState.prevTotalCeOi > 0) {
       const pcr = totalPeOi / totalCeOi;
       const prevPcr = chainMonitorState.prevTotalPeOi / chainMonitorState.prevTotalCeOi;
-      const pcrShift = Math.abs(pcr - prevPcr);
-      if (pcrShift >= 0.08) {
-        const dir = pcr > prevPcr ? "Bullish" : "Bearish";
+      const pcrShift = pcr - prevPcr;
+      if (Math.abs(pcrShift) >= chainMonitorState.pcrShiftThreshold) {
+        const dir = pcrShift > 0 ? "Bullish (PE/CE↑)" : "Bearish (PE/CE↓)";
         sendChainAlert("pcr-shift",
           `PCR Shift: ${dir}`,
-          `PCR ${prevPcr.toFixed(2)} → ${pcr.toFixed(2)} (PE OI: ${fmt(totalPeOi)}, CE OI: ${fmt(totalCeOi)})`
+          `PCR ${prevPcr.toFixed(2)} → ${pcr.toFixed(2)} · PE: ${fmt(totalPeOi)}, CE: ${fmt(totalCeOi)}`
         );
       }
     }
 
-    // Alert: heavy OI concentration (one strike has >N% of total OI on that side)
-    if (maxCe && totalCeOi > 0) {
-      const pct = (maxCe.oi / totalCeOi) * 100;
-      if (pct >= chainMonitorState.heavyOiThresholdPct) {
-        sendChainAlert(`heavy-ce-${maxCe.sp}`,
-          `Heavy CE OI: ${fmtStrike(maxCe.sp)}`,
-          `${pct.toFixed(1)}% of total CE OI (${fmt(maxCe.oi)} / ${fmt(totalCeOi)})`
-        );
+    // ── ATM straddle OI spike ─────────────────────────────────────
+    if (atm) {
+      const atmCeOi = rn(ce.find((l) => rn(l.sp ?? l.strike_price ?? l.strike) === atm)?.oi ?? ce.find((l) => rn(l.sp ?? l.strike_price ?? l.strike) === atm)?.open_interest) ?? 0;
+      const atmPeOi = rn(pe.find((l) => rn(l.sp ?? l.strike_price ?? l.strike) === atm)?.oi ?? pe.find((l) => rn(l.sp ?? l.strike_price ?? l.strike) === atm)?.open_interest) ?? 0;
+      const atmStraddleOi = atmCeOi + atmPeOi;
+      const prev = chainMonitorState.prevAtmStraddleOi;
+      if (prev > 0 && atmStraddleOi > 0) {
+        const spikePct = ((atmStraddleOi - prev) / prev) * 100;
+        if (spikePct >= chainMonitorState.atmStraddleSpikeThreshold) {
+          sendChainAlert(`atm-straddle-spike-${atm}`,
+            `ATM Straddle OI Spike: ${fmtStrike(atm)}`,
+            `+${spikePct.toFixed(1)}% combined CE+PE OI at ATM (${fmt(prev)} → ${fmt(atmStraddleOi)})`
+          );
+        }
       }
-    }
-    if (maxPe && totalPeOi > 0) {
-      const pct = (maxPe.oi / totalPeOi) * 100;
-      if (pct >= chainMonitorState.heavyOiThresholdPct) {
-        sendChainAlert(`heavy-pe-${maxPe.sp}`,
-          `Heavy PE OI: ${fmtStrike(maxPe.sp)}`,
-          `${pct.toFixed(1)}% of total PE OI (${fmt(maxPe.oi)} / ${fmt(totalPeOi)})`
-        );
+      chainMonitorState.prevAtmStraddleOi = atmStraddleOi;
+
+      // ── IV skew shift at ATM ──────────────────────────────────
+      const atmCeLeg = ce.find((l) => rn(l.sp ?? l.strike_price ?? l.strike) === atm);
+      const atmPeLeg = pe.find((l) => rn(l.sp ?? l.strike_price ?? l.strike) === atm);
+      const ceIv = rn(atmCeLeg?.iv ?? atmCeLeg?.IV ?? atmCeLeg?.implied_volatility);
+      const peIv = rn(atmPeLeg?.iv ?? atmPeLeg?.IV ?? atmPeLeg?.implied_volatility);
+      if (ceIv != null && peIv != null) {
+        const skew = ceIv - peIv;
+        const prevSkew = chainMonitorState.prevAtmIvSkew;
+        if (prevSkew != null && Math.abs(skew - prevSkew) >= chainMonitorState.ivSkewShiftThreshold) {
+          const dir = skew > prevSkew ? "CE IV rising vs PE (bearish skew)" : "PE IV rising vs CE (bullish skew)";
+          sendChainAlert("iv-skew-shift",
+            `IV Skew Shift at ATM ${fmtStrike(atm)}`,
+            `CE IV ${ceIv.toFixed(1)}% vs PE IV ${peIv.toFixed(1)}% · Skew ${skew > 0 ? "+" : ""}${skew.toFixed(1)}pp · ${dir}`
+          );
+        }
+        chainMonitorState.prevAtmIvSkew = skew;
       }
     }
 
+    // ── Persist state ─────────────────────────────────────────────
+    chainMonitorState.prevAtm = atm;
+    chainMonitorState.prevCallWall = maxCeStrike;
+    chainMonitorState.prevPutWall = maxPeStrike;
     chainMonitorState.prevTotalCeOi = totalCeOi;
     chainMonitorState.prevTotalPeOi = totalPeOi;
   }
