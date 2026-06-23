@@ -19,7 +19,9 @@ export const DEFAULT_CHAIN_COLUMNS = Object.fromEntries(CHAIN_COLUMNS.map((colum
 export const MARKET_STRIP_SYMBOLS = [
   { label: "NIFTY", instrument: "NIFTY", exchange: "NSE" },
   { label: "BANKNIFTY", instrument: "BANKNIFTY", exchange: "NSE" },
-  { label: "SENSEX", instrument: "SENSEX", exchange: "BSE" }
+  { label: "SENSEX", instrument: "SENSEX", exchange: "BSE" },
+  { label: "CRUDE", instrument: "CRUDEOIL", exchange: "MCX", unit: "₹/bbl" },
+  { label: "NAT GAS", instrument: "NATURALGAS", exchange: "MCX", unit: "₹/mmBtu" }
 ];
 
 export const INSTRUMENT_EXCHANGES = ["NSE", "BSE", "MCX"];

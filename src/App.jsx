@@ -2596,9 +2596,10 @@ function App() {
     stopMarketStripLive();
     resetSpotMonitor();
     if (!authed()) return;
-    if (!isMarketHours()) { setMarketStripStatus("Market closed (after 3:30 PM)"); return; }
-    const ms = msUntilMarketClose();
-    if (ms > 0) marketStripCutoffTimer = setTimeout(() => { stopMarketStripLive(); setMarketStripStatus("Market closed (after 3:30 PM)"); }, ms);
+    // Use MCX hours (23:30) as the strip includes commodities that trade till 11:30 PM
+    if (!isMarketHours("MCX")) { setMarketStripStatus("Market closed"); return; }
+    const ms = msUntilMarketClose("MCX");
+    if (ms > 0) marketStripCutoffTimer = setTimeout(() => { stopMarketStripLive(); setMarketStripStatus("Market closed"); }, ms);
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${location.host}/ws/live`);
     marketStripSocket = socket;
@@ -2610,13 +2611,14 @@ function App() {
         deviceId: deviceId().trim(),
         indexSubscriptions: [
           { exchange: "NSE", symbols: ["NIFTY", "BANKNIFTY"] },
-          { exchange: "BSE", symbols: ["SENSEX"] }
+          { exchange: "BSE", symbols: ["SENSEX"] },
+          { exchange: "MCX", symbols: ["CRUDEOIL", "NATURALGAS"] }
         ]
       }));
       setMarketStripStatus("Connecting live indices");
     };
     socket.onmessage = (event) => {
-      if (!isMarketHours()) { stopMarketStripLive(); setMarketStripStatus("Market closed (after 3:30 PM)"); return; }
+      if (!isMarketHours("MCX")) { stopMarketStripLive(); setMarketStripStatus("Market closed"); return; }
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (message.event === "status" && (message.status === "connected" || message.status === "subscribed")) {
@@ -2648,7 +2650,7 @@ function App() {
       if (marketStripSocket !== socket) return;
       marketStripSocket = null;
       setMarketStripStatus("Live stream reconnecting");
-      if (authed() && isMarketHours()) marketStripReconnectTimer = window.setTimeout(startMarketStripLive, 3000);
+      if (authed() && isMarketHours("MCX")) marketStripReconnectTimer = window.setTimeout(startMarketStripLive, 3000);
     };
   }
 
@@ -5580,7 +5582,7 @@ function App() {
                 <div class={`mkt-card ${item.ok ? tone : "muted"}`}>
                   <div class="mkt-top">
                     <span class="mkt-label">{item.label}</span>
-                    <span class="mkt-exch">{item.exchange}</span>
+                    <span class="mkt-exch">{item.unit ?? item.exchange}</span>
                   </div>
                   <div class="mkt-bottom">
                     <span class="mkt-price">{formatIndexValue(item.price)}</span>
