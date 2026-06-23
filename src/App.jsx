@@ -503,6 +503,116 @@ function App() {
     }
   }
 
+  // ── Spot Monitor Engine ──
+  const [spotMonitor, setSpotMonitor] = createSignal(false);
+  const [spotAlerts, setSpotAlerts] = createSignal([]);
+  let spotMonitorState = null;
+
+  function resetSpotMonitor() {
+    spotMonitorState = {
+      byIndex: new Map(),   // indexName → { priceHistory:[{p,ts}], gapFired, rangeBoundCheckTimer }
+      lastAlertTs: {},
+      cooldownMs: 90000,    // 90 s cooldown per alert key
+      // Speed alert: move > speedPct% within speedWindowSec seconds
+      speedPct: 0.18,       // 0.18% ~ 43 pts on NIFTY@24000, 94 pts on BANKNIFTY@52000
+      speedWindowSec: 60,
+      // Range-bound: high-low range < rangePct% for rangeMins minutes
+      rangePct: 0.10,
+      rangeMins: 5,
+      // Gap: open gap vs prevClose > gapPct%
+      gapPct: 0.25,
+    };
+  }
+
+  function sendSpotAlert(key, title, body) {
+    const now = Date.now();
+    if (!spotMonitorState) return;
+    const last = spotMonitorState.lastAlertTs[key] || 0;
+    if (now - last < spotMonitorState.cooldownMs) return;
+    spotMonitorState.lastAlertTs[key] = now;
+    setSpotAlerts((prev) => [{ title, body, ts: now }, ...prev].slice(0, 60));
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      new Notification(title, { body, silent: false });
+    } else if (typeof Notification !== "undefined" && Notification.permission !== "denied") {
+      Notification.requestPermission().then((p) => { if (p === "granted") new Notification(title, { body, silent: false }); });
+    }
+  }
+
+  function analyzeSpotTick(indexName, price, prevClose) {
+    if (!spotMonitor() || !spotMonitorState) return;
+    const p = Number(price);
+    const pc = Number(prevClose);
+    if (!Number.isFinite(p) || p <= 0) return;
+    const now = Date.now();
+
+    // Lazily init per-index state
+    if (!spotMonitorState.byIndex.has(indexName)) {
+      spotMonitorState.byIndex.set(indexName, { priceHistory: [], gapFired: false });
+    }
+    const st = spotMonitorState.byIndex.get(indexName);
+
+    // ── Gap from previous close ─────────────────────────────────
+    // Only fire within first 30 min of market open (09:15–09:45 IST)
+    if (!st.gapFired && Number.isFinite(pc) && pc > 0) {
+      const ist = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+      const minutesSinceOpen = (ist.getHours() - 9) * 60 + (ist.getMinutes() - 15);
+      if (minutesSinceOpen >= 0 && minutesSinceOpen <= 30) {
+        const gapPct = ((p - pc) / pc) * 100;
+        if (Math.abs(gapPct) >= spotMonitorState.gapPct) {
+          const dir = gapPct > 0 ? "Gap Up" : "Gap Down";
+          const pts = Math.abs(p - pc).toFixed(0);
+          sendSpotAlert(`gap-${indexName}`,
+            `${indexName} ${dir}: ${gapPct > 0 ? "+" : ""}${gapPct.toFixed(2)}%`,
+            `Open ${p.toFixed(0)} vs prev close ${pc.toFixed(0)} (${gapPct > 0 ? "+" : ""}${pts} pts)`
+          );
+          st.gapFired = true;
+        } else {
+          st.gapFired = true; // gap too small — mark fired so we don't re-check
+        }
+      }
+    }
+
+    // Append to rolling price history, keep last 15 min
+    st.priceHistory.push({ p, ts: now });
+    const cutoff15m = now - 15 * 60 * 1000;
+    while (st.priceHistory.length > 1 && st.priceHistory[0].ts < cutoff15m) st.priceHistory.shift();
+
+    // ── Speed alert ──────────────────────────────────────────────
+    // Find oldest price within speedWindowSec and compare
+    const speedCutoff = now - spotMonitorState.speedWindowSec * 1000;
+    const oldest = st.priceHistory.find((e) => e.ts >= speedCutoff);
+    if (oldest && oldest.p > 0) {
+      const movePct = Math.abs((p - oldest.p) / oldest.p) * 100;
+      const movePts = Math.abs(p - oldest.p);
+      if (movePct >= spotMonitorState.speedPct) {
+        const dir = p > oldest.p ? "▲" : "▼";
+        const secs = Math.round((now - oldest.ts) / 1000);
+        sendSpotAlert(`speed-${indexName}`,
+          `${indexName} Speed Alert ${dir} ${movePts.toFixed(0)} pts`,
+          `Moved ${movePts.toFixed(0)} pts (${movePct.toFixed(2)}%) in ${secs}s  |  ${oldest.p.toFixed(0)} → ${p.toFixed(0)}`
+        );
+      }
+    }
+
+    // ── Range-bound alert ────────────────────────────────────────
+    // Look at last rangeMins minutes — if high-low < rangePct%, it's trapped
+    const rangeCutoff = now - spotMonitorState.rangeMins * 60 * 1000;
+    const recentPrices = st.priceHistory.filter((e) => e.ts >= rangeCutoff);
+    if (recentPrices.length >= 5) {
+      const lo = Math.min(...recentPrices.map((e) => e.p));
+      const hi = Math.max(...recentPrices.map((e) => e.p));
+      const rangePct = ((hi - lo) / lo) * 100;
+      const spanMins = Math.round((now - recentPrices[0].ts) / 60000);
+      if (rangePct < spotMonitorState.rangePct && spanMins >= spotMonitorState.rangeMins) {
+        const pts = (hi - lo).toFixed(0);
+        sendSpotAlert(`range-${indexName}`,
+          `${indexName} Range Bound — ${pts} pt range`,
+          `Stuck between ${lo.toFixed(0)}–${hi.toFixed(0)} for ${spanMins} min (${rangePct.toFixed(2)}% range)`
+        );
+      }
+    }
+  }
+
   // ── Chain Monitor Engine ──
   const [chainMonitor, setChainMonitor] = createSignal(false);
   const [chainAlerts, setChainAlerts] = createSignal([]);
@@ -2484,6 +2594,7 @@ function App() {
 
   function startMarketStripLive() {
     stopMarketStripLive();
+    resetSpotMonitor();
     if (!authed()) return;
     if (!isMarketHours()) { setMarketStripStatus("Market closed (after 3:30 PM)"); return; }
     const ms = msUntilMarketClose();
@@ -2516,13 +2627,16 @@ function App() {
       for (const tick of ticks) {
         const tickName = String(tick?.indexname || tick?.index_name || tick?.symbol || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
         const tickExchange = String(tick?.exchange || "").toUpperCase();
+        const tickPrice = tick.index_value ?? tick.indexValue;
+        const tickPrevClose = tick.prev_close ?? tick.prevClose;
+        if (tickName && tickPrice != null) analyzeSpotTick(tickName, tickPrice, tickPrevClose);
         setMarketStrip((items) => items.map((item) => {
           const itemName = String(item.instrument || item.label).toUpperCase().replace(/[^A-Z0-9]/g, "");
           if (itemName !== tickName || (tickExchange && item.exchange !== tickExchange)) return item;
           return {
             ...item,
-            price: tick.index_value ?? tick.indexValue ?? item.price,
-            prevClose: tick.prev_close ?? tick.prevClose ?? item.prevClose,
+            price: tickPrice ?? item.price,
+            prevClose: tickPrevClose ?? item.prevClose,
             change: tick.changepercent ?? tick.change_percent ?? tick.changePercent ?? item.change,
             ok: true
           };
@@ -5418,6 +5532,7 @@ function App() {
     loadChainSearchRows, removeRollLine, toggleRollSeries,
     straddleMonitor, setStraddleMonitor, straddleAlerts, setStraddleAlerts,
     chainMonitor, setChainMonitor, chainAlerts, setChainAlerts,
+    spotMonitor, setSpotMonitor, spotAlerts,
     loadOieExpiries, loadOie, loadSpotPrice, loadPriceChart, loadOptionChainExpiries,
   };
 
@@ -5483,6 +5598,13 @@ function App() {
               );
             }}
           </For>
+          <button
+            data-ui="button"
+            data-appearance="stealth"
+            title="Spot Monitor: Speed, Range-bound, Gap alerts"
+            style={`font-size:10px;padding:2px 8px;border-radius:4px;border:1px solid ${spotMonitor() ? "rgba(34,197,94,0.5)" : "rgba(255,255,255,0.1)"};background:${spotMonitor() ? "rgba(34,197,94,0.12)" : "transparent"};color:${spotMonitor() ? "#22c55e" : "var(--tx-3)"};white-space:nowrap;cursor:pointer`}
+            onClick={() => setSpotMonitor((v) => !v)}
+          >{spotMonitor() ? "● Monitor ON" : "Monitor"}</button>
         </div>
 
         <div data-ui="tabs" class="analysis-nav-tabs shrink-0" data-activeid={section()} aria-label="Analysis views">
@@ -5573,6 +5695,20 @@ function App() {
           </span>
         </div>
       </header>
+      </Show>
+
+      <Show when={spotMonitor() && spotAlerts().length}>
+        <div style="display:flex;gap:6px;padding:4px 12px;overflow-x:auto;background:rgba(34,197,94,0.04);border-bottom:1px solid rgba(34,197,94,0.12);flex-shrink:0;align-items:center">
+          <span style="font-size:9px;color:#22c55e;font-weight:700;letter-spacing:.05em;flex-shrink:0;opacity:.7">SPOT</span>
+          <For each={spotAlerts().slice(0, 6)}>
+            {(a) => (
+              <div style="flex-shrink:0;padding:3px 10px;border-radius:4px;background:rgba(34,197,94,0.07);border:1px solid rgba(34,197,94,0.2);font-size:10px;white-space:nowrap">
+                <span style="color:#22c55e;font-weight:700">{a.title}</span>
+                <span style="color:var(--tx-3);margin-left:6px">{a.body}</span>
+              </div>
+            )}
+          </For>
+        </div>
       </Show>
 
       <Show when={!widgetMode && mainHelpOpen()}>
