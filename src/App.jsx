@@ -2557,6 +2557,9 @@ function App() {
       return;
     }
     const results = await Promise.all(MARKET_STRIP_SYMBOLS.map(async (item) => {
+      // MCX commodities (CRUDEOIL, NATURALGAS) are not available via the optionchains REST endpoint.
+      // Their prices arrive via the WebSocket index feed — skip the REST fetch for them.
+      if (item.exchange === "MCX") return { ...item, price: null, change: null, ok: false };
       let lastError = "";
       for (const instrument of item.instruments || [item.instrument]) {
         const suffix = item.exchange && item.exchange !== "NSE" ? `?exchange=${encodeURIComponent(item.exchange)}` : "";
