@@ -753,13 +753,19 @@ function App() {
   let rollReferenceCount = 0;
   let rollManualScales = { x: null, price: null, iv: null };
   const rollPriceLines = new Map();
+  let chartResizeQueued = false;
+  let rollScaleApplyQueued = false;
   let autoChainSearchKey = "";
   let rollLiveSocket = null;
   let rollLiveContext = null;
-  let rollLiveFlushTimer = null;
   let rollCutoffTimer = null;
   let chainLiveSocket = null;
   let chainCutoffTimer = null;
+  let pendingChainData = null;
+  let chainRafId = null;
+  let rollThrottleTimer = null;
+  let rollThrottlePending = null;
+  let rollExportBuffer = [];
   let marketStripSocket = null;
   let marketStripReconnectTimer = null;
   let marketStripCutoffTimer = null;
@@ -1421,7 +1427,7 @@ function App() {
       option.change_in_oi_percent
     );
     const pct = rawPct ?? (change != null && previousOi ? (change / previousOi) * 100 : null);
-    const changeText = change == null ? "--" : formatCompact(Math.abs(change));
+    const changeText = change == null ? "--" : number.format(Math.round(Math.abs(change)));
     const pctText = pct == null ? "" : ` (${pct.toFixed(2)}%)`;
     return {
       text: `${change != null && change < 0 ? "-" : ""}${changeText}${pctText}`,
@@ -1443,11 +1449,11 @@ function App() {
       case "vega":
         return { value: pickOptionValue(option, ["vega", "vega_value", "vegaValue"]) };
       case "volume":
-        return { value: pickOptionValue(option, ["volume", "vol", "traded_volume", "tradedVolume"]), compact: true };
+        return { value: pickOptionValue(option, ["volume", "vol", "traded_volume", "tradedVolume"]), indian: true };
       case "oi":
         return {
           value: pickOptionValue(option, ["oi", "open_interest", "openInterest"]),
-          compact: true,
+          indian: true,
           tone: "oi",
           style: `--oi-bar:${Math.min(100, Math.round(((Math.abs(rawNumber(option?.oi ?? option?.open_interest) || 0)) / maxOiAbs()) * 100))}%`
         };
@@ -1474,9 +1480,11 @@ function App() {
   }
 
   function queueChartResize() {
+    if (chartResizeQueued) return;
+    chartResizeQueued = true;
     requestAnimationFrame(() => {
+      chartResizeQueued = false;
       resizeVisibleCharts();
-      requestAnimationFrame(resizeVisibleCharts);
     });
   }
 
@@ -3115,15 +3123,68 @@ function App() {
     };
   }
 
-  function handleChainLiveTick(chain) {
-    const next = normalizeLiveChain(chain);
-    if (!next) return;
-    const rowCount = chainRowCount(next);
-    if (!rowCount) return;
+  function firstRawPriceLevel(levels) {
+    const level = Array.isArray(levels) ? levels[0] : null;
+    const price = Number(level?.price);
+    return Number.isFinite(price) && price > 0 ? price : null;
+  }
+
+  function normalizeLiveQuoteTick(tick) {
+    if (!tick || typeof tick !== "object") return null;
+    const bid = firstRawPriceLevel(tick.bids);
+    const ask = firstRawPriceLevel(tick.asks);
+    const midpoint = Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 : bid ?? ask ?? null;
+    return {
+      ...tick,
+      ltp: tick.ltp ?? tick.last_traded_price ?? tick.lastTradedPrice ?? midpoint,
+      last_traded_price: tick.last_traded_price ?? tick.lastTradedPrice ?? tick.ltp ?? midpoint,
+      bid_price: tick.bid_price ?? bid,
+      ask_price: tick.ask_price ?? ask
+    };
+  }
+
+  function mergeChainLiveTicks(payload) {
+    const current = chainData();
+    if (!current) return;
+    const updatesByRef = new Map();
+    eachLivePayload(payload, (tick) => {
+      const refId = liveRefId(tick);
+      const update = normalizeLiveQuoteTick(tick);
+      if (refId && update) updatesByRef.set(refId, { ...(updatesByRef.get(refId) || {}), ...update });
+    });
+    if (!updatesByRef.size) return;
+    const mergeSide = (options) => (Array.isArray(options) ? options : []).map((option) => {
+      const refId = liveRefId(option);
+      return refId && updatesByRef.has(refId)
+        ? normalizeLiveOption({ ...option, ...updatesByRef.get(refId) })
+        : option;
+    });
+    const next = {
+      ...current,
+      ce: mergeSide(current.ce),
+      pe: mergeSide(current.pe)
+    };
+    pendingChainData = next;
+    if (!chainRafId) chainRafId = requestAnimationFrame(flushChainData);
+  }
+
+  function flushChainData() {
+    chainRafId = null;
+    if (!pendingChainData) return;
+    const next = pendingChainData;
+    pendingChainData = null;
     analyzeChainTick(next);
     setChainData(next);
     if (next.expiry) setChainExpiry(String(next.expiry));
-    setChainStatus(`Live · ${rowCount} strikes`);
+    setChainStatus(`Live · ${chainRowCount(next)} strikes`);
+  }
+
+  function handleChainLiveTick(chain) {
+    const next = normalizeLiveChain(chain);
+    if (!next) return;
+    if (!chainRowCount(next)) return;
+    pendingChainData = next;
+    if (!chainRafId) chainRafId = requestAnimationFrame(flushChainData);
   }
 
   function startChainLive() {
@@ -3174,6 +3235,7 @@ function App() {
       if (!isMarketHours(chainExchange())) { stopChainLive(); setChainStatus("Market closed"); return; }
       let msg; try { msg = JSON.parse(event.data); } catch { return; }
       if (msg.event === "option" && msg.data) handleChainLiveTick(msg.data);
+      if ((msg.event === "orderbook" || msg.event === "greeks") && msg.data) mergeChainLiveTicks(msg.data);
       if (msg.event === "status" && msg.status === "connected") setChainStatus("Live connected");
       if (msg.event === "status" && msg.status === "subscribed") {
         const rowCount = chainRowCount(chainData());
@@ -3194,6 +3256,7 @@ function App() {
 
   function stopChainLive() {
     if (chainCutoffTimer) { clearTimeout(chainCutoffTimer); chainCutoffTimer = null; }
+    if (chainRafId) { cancelAnimationFrame(chainRafId); chainRafId = null; pendingChainData = null; }
     if (chainLiveSocket) {
       try { chainLiveSocket.send(JSON.stringify({ type: "stop" })); } catch {}
       chainLiveSocket.close();
@@ -3458,39 +3521,14 @@ function App() {
       commit();
       return;
     }
-    const start = {
-      bid: Number.isFinite(rollLiveContext.lastValues.bid) ? rollLiveContext.lastValues.bid : target.bid,
-      ask: Number.isFinite(rollLiveContext.lastValues.ask) ? rollLiveContext.lastValues.ask : target.ask,
-      iv: Number.isFinite(rollLiveContext.lastValues.iv) ? rollLiveContext.lastValues.iv : target.ivMid
-    };
     const baseData = rollChartData.map((series) => series.slice());
-    const started = performance.now();
-    const duration = 200;
-
     if (rollLiveContext.frames.live) cancelAnimationFrame(rollLiveContext.frames.live);
-
-    const step = (now) => {
-      if (!rollLiveContext || !rollChart || !isMarketHours(rollExchange())) return;
-      const progress = Math.min(1, (now - started) / duration);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      const bid = start.bid + (target.bid - start.bid) * eased;
-      const ask = start.ask + (target.ask - start.ask) * eased;
-      const iv = target.ivMid == null || !Number.isFinite(start.iv)
-        ? target.ivMid
-        : start.iv + (target.ivMid - start.iv) * eased;
-      drawRollPreview(withPreviewPoint(baseData, time, bid, ask, iv));
-      if (progress < 1) {
-        rollLiveContext.frames.live = requestAnimationFrame(step);
-        return;
-      }
-      rollLiveContext.frames.live = null;
-      rollLiveContext.lastValues.bid = target.bid;
-      rollLiveContext.lastValues.ask = target.ask;
-      if (target.ivMid != null) rollLiveContext.lastValues.iv = target.ivMid;
-      commit();
-    };
-
-    rollLiveContext.frames.live = requestAnimationFrame(step);
+    rollLiveContext.frames.live = null;
+    rollLiveContext.lastValues.bid = target.bid;
+    rollLiveContext.lastValues.ask = target.ask;
+    if (target.ivMid != null) rollLiveContext.lastValues.iv = target.ivMid;
+    drawRollPreview(withPreviewPoint(baseData, time, target.bid, target.ask, target.ivMid));
+    commit();
   }
 
   function readLiveLeg(row) {
@@ -3569,7 +3607,7 @@ function App() {
         ivMid: best.ivMid
       };
       rollLiveContext.points += 1;
-      setRollExportData((rows) => [...rows, nextRow]);
+      rollExportBuffer.push(nextRow);
       setRollStats((prev) => ({
         ...prev,
         spot: rupee.format(spot),
@@ -3578,20 +3616,23 @@ function App() {
         ask: rupee.format(best.ask),
         iv: best.ivMid != null ? `${best.ivMid.toFixed(1)}%` : prev.iv,
         points: String((Number(prev.points) || 0) + 1),
-        meta: `${rollSymbol().trim().toUpperCase()} ${rollExpiry()} | live 1-second animated ${best.hasBook ? "bid/ask" : "LTP fallback"} | ${rollExchange()}`
+        meta: `${rollSymbol().trim().toUpperCase()} ${rollExpiry()} | live tick ${best.hasBook ? "bid/ask" : "LTP fallback"} | ${rollExchange()}`
       }));
-      setRollStatus(best.hasBook ? "Live animated" : "Live animated LTP");
+      setRollStatus(best.hasBook ? "Live tick" : "Live tick LTP");
     });
   }
 
   function scheduleRollLiveUpdate(receivedAtMs) {
     if (!isMarketHours(rollExchange())) { stopRollLive(); setRollStatus("Market closed"); return; }
-    if (rollLiveFlushTimer) return;
-    rollLiveFlushTimer = setTimeout(() => {
-      rollLiveFlushTimer = null;
-      if (!isMarketHours(rollExchange())) { stopRollLive(); setRollStatus("Market closed"); return; }
-      updateRollLiveSnapshot(receivedAtMs || Date.now());
-    }, 250);
+    rollThrottlePending = receivedAtMs || Date.now();
+    if (!rollThrottleTimer) {
+      rollThrottleTimer = setTimeout(() => {
+        rollThrottleTimer = null;
+        const ts = rollThrottlePending;
+        rollThrottlePending = null;
+        updateRollLiveSnapshot(ts);
+      }, 250);
+    }
   }
 
   function handleRollLiveChain(chain, receivedAtMs) {
@@ -3687,10 +3728,7 @@ function App() {
 
   function stopRollLive() {
     if (rollCutoffTimer) { clearTimeout(rollCutoffTimer); rollCutoffTimer = null; }
-    if (rollLiveFlushTimer) {
-      clearTimeout(rollLiveFlushTimer);
-      rollLiveFlushTimer = null;
-    }
+    if (rollThrottleTimer) { clearTimeout(rollThrottleTimer); rollThrottleTimer = null; rollThrottlePending = null; }
     if (rollLiveContext?.frames) {
       for (const frame of Object.values(rollLiveContext.frames)) {
         if (frame) cancelAnimationFrame(frame);
@@ -3861,9 +3899,11 @@ function App() {
   }
 
   function scheduleApplyRollManualScales() {
+    if (rollScaleApplyQueued) return;
+    rollScaleApplyQueued = true;
     requestAnimationFrame(() => {
+      rollScaleApplyQueued = false;
       applyRollManualScales();
-      requestAnimationFrame(applyRollManualScales);
     });
   }
 
@@ -4528,6 +4568,7 @@ function App() {
       points: "0",
       meta: `${sym} ${rollExpiry() || "Auto"} | loading | ${rollExchange()}`
     }));
+    rollExportBuffer = [];
     setRollExportData([]);
     setRollChartLines([], [], []);
     const spotSym = rollExchange() === "MCX" ? await resolveMcxMarketSymbol(sym, rollExpiry()) : sym;
@@ -4734,7 +4775,7 @@ function App() {
   }
 
   function downloadCSV() {
-    const rows = rollExportData();
+    const rows = rollExportBuffer.length ? rollExportBuffer : rollExportData();
     if (!rows.length) return;
     const sym = rollSymbol().trim().toUpperCase();
     const expiry = rollExpiry();
@@ -4796,7 +4837,7 @@ function App() {
   }
 
   function downloadParquet() {
-    const rows = rollExportData();
+    const rows = rollExportBuffer.length ? rollExportBuffer : rollExportData();
     if (!rows.length) return;
     const sym = rollSymbol().trim().toUpperCase();
     const expiry = rollExpiry();
@@ -4890,6 +4931,7 @@ function App() {
       if (first.Expiry) setRollExpiry(String(first.Expiry));
       if (first.Exchange) setRollExchange(String(first.Exchange));
 
+      rollExportBuffer = [];
       setRollExportData(selected);
 
       // Plot without fetching
@@ -4936,6 +4978,7 @@ function App() {
     queueChartResize();
     onCleanup(() => {
       document.removeEventListener("mousedown", closeChainSearch);
+      window.removeEventListener("resize", resizeVisibleCharts);
       removeWidgetStateListener?.();
     });
   });

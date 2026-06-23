@@ -1,7 +1,7 @@
 // Single option-chain table cell with money/compact/plain formatting + OI tag.
 
 import { Show } from "solid-js";
-import { formatMoney, formatCompact, formatPlain } from "../lib/format.js";
+import { formatMoney, formatCompact, formatPlain, number } from "../lib/format.js";
 
 export function OptionCell(props) {
   const n = Number(props.value);
@@ -10,6 +10,7 @@ export function OptionCell(props) {
     if (props.text != null) return props.text;
     if (!hasValue) return "--";
     if (props.money) return formatMoney(n);
+    if (props.indian) return number.format(Math.round(n));
     if (props.compact) return formatCompact(n);
     return `${formatPlain(n, props.digits ?? 2)}${props.suffix || ""}`;
   };
