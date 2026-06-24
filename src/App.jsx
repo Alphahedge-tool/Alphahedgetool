@@ -385,7 +385,8 @@ function App() {
   const [rollSeriesVisibility, setRollSeriesVisibility] = createSignal({
     bid: localStorage.getItem("nubraRollSeriesBid") !== "0",
     ask: localStorage.getItem("nubraRollSeriesAsk") !== "0",
-    iv: localStorage.getItem("nubraRollSeriesIv") !== "0"
+    iv: localStorage.getItem("nubraRollSeriesIv") !== "0",
+    avg: localStorage.getItem("nubraRollSeriesAvg") !== "0"
   });
   const [widgetMaximized, setWidgetMaximized] = createSignal(false);
   const [marketStrip, setMarketStrip] = createSignal(MARKET_STRIP_SYMBOLS.map((item) => ({
@@ -989,7 +990,8 @@ function App() {
   let rollAskSeries;
   let rollIvSeries;
   let rollChartLines = { bid: [], ask: [], iv: [] };
-  let rollChartData = [[], [], [], []];
+  // [time, bid, ask, iv, avg, ...drawnLines]
+  let rollChartData = [[], [], [], [], []];
   let rollReferenceCount = 0;
   let rollManualScales = { x: null, price: null, iv: null };
   const rollPriceLines = new Map();
@@ -3749,11 +3751,14 @@ function App() {
       data[1].push(bid);
       data[2].push(ask);
       data[3].push(iv);
-      for (let i = 4; i < data.length; i += 1) {
-        const line = rollDrawnLines()[i - 4];
+      // Drawn reference lines live at index 5+ (after the running-avg series).
+      for (let i = 5; i < data.length; i += 1) {
+        const line = rollDrawnLines()[i - 5];
         data[i].push(line ? line.value : null);
       }
     }
+    // Recompute the running-average series (index 4) over the previewed data.
+    data[4] = computeRunningAvg(data[1], data[2]);
     return data;
   }
 
@@ -4081,12 +4086,32 @@ function App() {
     queueChartResize();
   }
 
+  // Running (cumulative) average of the straddle mid = (bid + ask) / 2.
+  // Returns one value per x-point: the mean of every mid seen up to that point.
+  function computeRunningAvg(bidArr, askArr) {
+    const out = [];
+    let sum = 0;
+    let count = 0;
+    const length = bidArr?.length || 0;
+    for (let i = 0; i < length; i += 1) {
+      const bid = Number(bidArr[i]);
+      const ask = Number(askArr?.[i]);
+      if (Number.isFinite(bid) && Number.isFinite(ask)) {
+        sum += (bid + ask) / 2;
+        count += 1;
+      }
+      out.push(count ? sum / count : null);
+    }
+    return out;
+  }
+
   function rollChartSeriesConfig() {
     const base = [
       {},
       { label: "Bid", scale: "price", show: rollSeriesVisibility().bid, stroke: "#21d19f", width: 1.6, points: { show: false } },
       { label: "Ask", scale: "price", show: rollSeriesVisibility().ask, stroke: "#ffb15c", width: 1.6, points: { show: false } },
-      { label: "IV %", scale: "iv", show: rollSeriesVisibility().iv, stroke: "#22d3ee", width: 1.2, points: { show: false } }
+      { label: "IV %", scale: "iv", show: rollSeriesVisibility().iv, stroke: "#22d3ee", width: 1.2, points: { show: false } },
+      { label: "Avg ₹", scale: "price", show: rollSeriesVisibility().avg, stroke: "#facc15", width: 1.4, dash: [4, 4], points: { show: false } }
     ];
     for (const line of rollDrawnLines()) {
       base.push({
@@ -4488,6 +4513,7 @@ function App() {
           const defs = [
             { cls: "roll-last-bid", key: "bid", color: "#21d19f", series: 1, scale: "price", side: "right" },
             { cls: "roll-last-ask", key: "ask", color: "#ffb15c", series: 2, scale: "price", side: "right" },
+            { cls: "roll-last-avg", key: "avg", color: "#facc15", series: 4, scale: "price", side: "right" },
             { cls: "roll-last-iv", key: "iv", color: "#22d3ee", series: 3, scale: "iv", side: "left" },
             { cls: "roll-last-time", color: "#7b8491", series: 0, scale: "x", side: "bottom" },
           ];
@@ -4574,10 +4600,12 @@ function App() {
           const bid = rollChartData[1]?.[idx];
           const ask = rollChartData[2]?.[idx];
           const iv = rollChartData[3]?.[idx];
+          const avg = rollChartData[4]?.[idx];
           if (!Number.isFinite(time)) { tooltip.hidden = true; return; }
           const parts = [`<span class="roll-tip-time">${formatIstTime(time)}</span>`];
           if (rollSeriesVisibility().bid && Number.isFinite(bid)) parts.push(`<span style="color:#21d19f">Bid: ${rupee.format(bid)}</span>`);
           if (rollSeriesVisibility().ask && Number.isFinite(ask)) parts.push(`<span style="color:#ffb15c">Ask: ${rupee.format(ask)}</span>`);
+          if (rollSeriesVisibility().avg && Number.isFinite(avg)) parts.push(`<span style="color:#facc15">Avg: ${rupee.format(avg)}</span>`);
           if (rollSeriesVisibility().iv && Number.isFinite(iv)) parts.push(`<span style="color:#22d3ee">IV: ${iv.toFixed(2)}%</span>`);
           tooltip.innerHTML = parts.join("");
           tooltip.hidden = false;
@@ -4776,11 +4804,14 @@ function App() {
       ivByTime.set(point.time, point.value);
     }
     const x = [...times].sort((a, b) => a - b);
+    const bidArr = x.map((time) => bidByTime.get(time) ?? null);
+    const askArr = x.map((time) => askByTime.get(time) ?? null);
     const data = [
       x,
-      x.map((time) => bidByTime.get(time) ?? null),
-      x.map((time) => askByTime.get(time) ?? null),
-      x.map((time) => ivByTime.get(time) ?? null)
+      bidArr,
+      askArr,
+      x.map((time) => ivByTime.get(time) ?? null),
+      computeRunningAvg(bidArr, askArr)
     ];
     for (const line of rollDrawnLines()) {
       data.push(x.map(() => line.value));

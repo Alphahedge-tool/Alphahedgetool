@@ -132,6 +132,17 @@ export function RollingView() {
               <button data-ui="button"
                 data-appearance="stealth"
                 type="button"
+                class={rollSeriesVisibility().avg ? "" : "opacity-40 line-through"}
+                aria-pressed={rollSeriesVisibility().avg}
+                title={rollSeriesVisibility().avg ? "Mute Avg series" : "Show Avg straddle price"}
+                onClick={() => toggleRollSeries("avg", 4)}
+              >
+                <span class="inline-block h-px w-4" style="border-top:2px dashed #facc15"></span>
+                <span style="color:var(--text-muted)">Avg ₹</span>
+              </button>
+              <button data-ui="button"
+                data-appearance="stealth"
+                type="button"
                 class={rollSeriesVisibility().iv ? "" : "opacity-40 line-through"}
                 aria-pressed={rollSeriesVisibility().iv}
                 title={rollSeriesVisibility().iv ? "Mute IV series" : "Show IV series"}
