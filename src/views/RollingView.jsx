@@ -4,6 +4,7 @@
 
 import { For, Show } from "solid-js";
 import { rupee } from "../lib/format.js";
+import { ROLL_LIVE_THROTTLE_OPTIONS } from "../lib/constants.js";
 import { useApp } from "../state/AppContext.jsx";
 
 export function RollingView() {
@@ -12,6 +13,7 @@ export function RollingView() {
     rollStats, rollStatus, rollDrawnLines, rollWindowMode, rollSeriesVisibility,
     removeRollLine, rollLineColor, setRollChartWindowMode, toggleRollSeries,
     registerRollChartHost,
+    rollLiveThrottle, setRollLiveThrottle,
     straddleMonitor, setStraddleMonitor, straddleAlerts,
   } = useApp();
 
@@ -106,6 +108,13 @@ export function RollingView() {
                 <button data-ui="tab" id="3h" onClick={() => setRollChartWindowMode("3h")}>3H</button>
                 <button data-ui="tab" id="1h" onClick={() => setRollChartWindowMode("1h")}>1H</button>
                 <button data-ui="tab" id="30m" onClick={() => setRollChartWindowMode("30m")}>30M</button>
+              </div>
+              <div data-ui="tabs" class="shrink-0" data-activeid={String(rollLiveThrottle())} aria-label="Live tick rate" title="Live feed: Tick = draw every tick; else coalesce per window">
+                <For each={ROLL_LIVE_THROTTLE_OPTIONS}>
+                  {(opt) => (
+                    <button data-ui="tab" id={String(opt.value)} onClick={() => setRollLiveThrottle(opt.value)}>{opt.label}</button>
+                  )}
+                </For>
               </div>
               <button data-ui="button"
                 data-appearance="stealth"

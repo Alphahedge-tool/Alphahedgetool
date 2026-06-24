@@ -39,7 +39,23 @@ export const INSTRUMENT_DB = "nubra-instrument-cache-v1";
 export const INSTRUMENT_STORE = "masters";
 export const ROLLING_INTERVALS = ["1s", "1m"];
 export const ROLLING_BATCH_SIZE = 8;
-export const ROLLING_FETCH_CONCURRENCY = 4;
+// Keep concurrency low: Nubra's gateway returns 403 (nginx) when too many
+// charts/timeseries requests arrive in a burst. One batch of 8 at a time, with
+// a short pause between batches, stays under that limit.
+export const ROLLING_FETCH_CONCURRENCY = 1;
+export const ROLLING_BATCH_DELAY_MS = 220;
+// Nubra rejects history older than this many days with HTTP 400.
+export const ROLLING_MAX_HISTORY_DAYS = 7;
+
+// Rolling Straddle live feed: how often (ms) incoming WS ticks are flushed to
+// the chart. 0 = per-tick (every message drawn, no coalescing). Higher values
+// coalesce bursts to at most one draw per window (e.g. 250 = ~4 draws/sec).
+export const ROLL_LIVE_THROTTLE_OPTIONS = [
+  { value: 0,   label: "Tick" },
+  { value: 250, label: "250ms" },
+  { value: 1000, label: "1s" }
+];
+export const ROLL_LIVE_THROTTLE_DEFAULT = 0;
 
 // OIE chart styling tokens (uPlot).
 export const OIE_AXIS_FONT = "11px Inter, system-ui, sans-serif";

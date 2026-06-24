@@ -2,7 +2,6 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, 
 import * as KDialog from "@kobalte/core/dialog";
 import * as KSelect from "@kobalte/core/select";
 import Highcharts from "highcharts";
-import uPlot from "uplot";
 
 // ── extracted helpers / constants / components ──
 import {
@@ -28,6 +27,8 @@ import {
   MARKET_STRIP_SYMBOLS, INSTRUMENT_EXCHANGES, SYMBOL_CATEGORIES,
   INSTRUMENT_DB, INSTRUMENT_STORE,
   ROLLING_INTERVALS, ROLLING_BATCH_SIZE, ROLLING_FETCH_CONCURRENCY,
+  ROLLING_BATCH_DELAY_MS, ROLLING_MAX_HISTORY_DAYS,
+  ROLL_LIVE_THROTTLE_OPTIONS, ROLL_LIVE_THROTTLE_DEFAULT,
   OIE_AXIS_FONT, OIE_GRID, OIE_TICK, OIE_TEXT
 } from "./lib/constants.js";
 import { makeChart } from "./lib/chart.js";
@@ -908,7 +909,8 @@ function App() {
   const [rollLineValue, setRollLineValue] = createSignal("");
   const [rollLineTarget, setRollLineTarget] = createSignal("bid");
   const [rollDrawnLines, setRollDrawnLines] = createSignal([]);
-  const [rollWindowMode, setRollWindowMode] = createSignal("3h");
+  const [rollWindowMode, setRollWindowMode] = createSignal("full");
+  const [rollLiveThrottle, setRollLiveThrottle] = createSignal(ROLL_LIVE_THROTTLE_DEFAULT);
   let importFileRef;
 
   const [chainSymbol, setChainSymbol] = createSignal("NIFTY");
@@ -985,18 +987,23 @@ function App() {
   let gammaExpiryChart;
   let priceChart;
   let candleSeries;
-  let rollChart;
-  let rollBidSeries;
-  let rollAskSeries;
-  let rollIvSeries;
+  let rollChart;            // LightweightCharts IChartApi (v5)
+  let rollBidSeries;        // right axis (₹)
+  let rollAskSeries;        // right axis (₹)
+  let rollAvgSeries;        // right axis (₹, dashed)
+  let rollIvSeries;         // left axis (%)
+  let rollLineSeries = [];  // user-drawn reference line series (right or left axis)
+  let rollUserInteracted = false; // true once user zooms/pans; suppresses auto-fit
+  let rollSyncingWindow = 0;  // >0 while programmatic time-scale changes are in flight (suppresses auto-fit latch)
   let rollChartLines = { bid: [], ask: [], iv: [] };
-  // [time, bid, ask, iv, avg, ...drawnLines]
+  // Columnar source-of-truth buffer: [time(sec), bid, ask, iv, avg, ...drawnLines]
   let rollChartData = [[], [], [], [], []];
+  // Incremental running-average accumulator so live ticks don't rescan the whole
+  // day each time (that was O(N) per tick -> O(N^2) over the session = lag).
+  let rollAvgSum = 0;
+  let rollAvgCount = 0;
   let rollReferenceCount = 0;
-  let rollManualScales = { x: null, price: null, iv: null };
-  const rollPriceLines = new Map();
   let chartResizeQueued = false;
-  let rollScaleApplyQueued = false;
   let autoChainSearchKey = "";
   let rollLiveSocket = null;
   let rollLiveContext = null;
@@ -1711,9 +1718,9 @@ function App() {
     const rect = host.getBoundingClientRect();
     const width = Math.max(1, Math.floor(rect.width));
     const height = Math.max(1, Math.floor(rect.height));
-    if (typeof chart.setSize === "function") chart.setSize({ width, height });
-    else chart.resize(width, height);
-    if (chart === rollChart) scheduleApplyRollManualScales();
+    if (typeof chart.resize === "function") chart.resize(width, height);
+    else if (typeof chart.applyOptions === "function") chart.applyOptions({ width, height });
+    else if (typeof chart.setSize === "function") chart.setSize({ width, height });
   }
 
   function resizeVisibleCharts() {
@@ -1750,34 +1757,48 @@ function App() {
 
   async function nubraFetch(path, options = {}) {
     const target = new URL(path, `${environment()}/`);
-    const controller = options.timeoutMs ? new AbortController() : null;
-    const timeout = controller ? window.setTimeout(() => controller.abort(), options.timeoutMs) : null;
-    let response;
-    try {
-      response = await fetch(`/api/proxy?url=${encodeURIComponent(target.toString())}`, {
-        method: options.method || "GET",
-        headers: { ...authHeaders(), ...(options.headers || {}) },
-        body: options.body,
-        signal: controller?.signal
-      });
-    } catch (error) {
-      if (error?.name === "AbortError") throw new Error(`Request timed out: ${path}`);
-      throw error;
-    } finally {
-      if (timeout != null) window.clearTimeout(timeout);
-    }
-    const text = await response.text();
-    let payload;
-    try {
-      payload = text ? JSON.parse(text) : null;
-    } catch {
-      payload = text;
-    }
-    if (!response.ok) {
+    // The Nubra gateway throttles bursts with 403/429 (an nginx page, not an app
+    // error). Retry those a few times with exponential backoff so a transient
+    // throttle doesn't fail the whole load. Auth errors (401) are NOT retried.
+    const maxRetries = options.retries ?? 3;
+    let attempt = 0;
+    while (true) {
+      const controller = options.timeoutMs ? new AbortController() : null;
+      const timeout = controller ? window.setTimeout(() => controller.abort(), options.timeoutMs) : null;
+      let response;
+      try {
+        response = await fetch(`/api/proxy?url=${encodeURIComponent(target.toString())}`, {
+          method: options.method || "GET",
+          headers: { ...authHeaders(), ...(options.headers || {}) },
+          body: options.body,
+          signal: controller?.signal
+        });
+      } catch (error) {
+        if (error?.name === "AbortError") throw new Error(`Request timed out: ${path}`);
+        throw error;
+      } finally {
+        if (timeout != null) window.clearTimeout(timeout);
+      }
+      const text = await response.text();
+      let payload;
+      try {
+        payload = text ? JSON.parse(text) : null;
+      } catch {
+        payload = text;
+      }
+      if (response.ok) return payload;
+
       const detail = payload?.error || payload?.message || response.statusText;
+      const throttled = response.status === 403 || response.status === 429;
+      if (throttled && attempt < maxRetries) {
+        attempt += 1;
+        const backoff = 400 * Math.pow(2, attempt - 1); // 400ms, 800ms, 1600ms
+        setRollStatus(`Gateway busy — retry ${attempt}/${maxRetries} in ${backoff}ms`);
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+        continue;
+      }
       throw new Error(`${response.status}: ${detail}`);
     }
-    return payload;
   }
 
   async function fetchTimeseriesWithIntervals(query, intervals = ROLLING_INTERVALS) {
@@ -2782,15 +2803,8 @@ function App() {
     setChartStatus("Ready");
   }
 
-  async function loadPriceChart() {
-    initPriceChart();
-    if (!candleSeries) throw new Error("Chart engine is still loading. Try Load Chart again in a moment.");
-    setChartStatus("Loading");
-    const exchangeName = exchange();
-    const sym = exchangeName === "MCX"
-      ? mcxMarketSymbol(symbol(), chainExpiry() || rollExpiry())
-      : symbol().trim().toUpperCase();
-    const type = exchangeName === "MCX" && sym.startsWith("FUT_") ? "FUT" : instrumentType();
+  // Fetch + parse OHLC candles for one symbol over a time window.
+  async function fetchCandles(exchangeName, type, sym, chunkStart, chunkEnd) {
     const data = await nubraFetch("charts/timeseries", {
       method: "POST",
       body: JSON.stringify({
@@ -2799,8 +2813,8 @@ function App() {
           type,
           values: [sym],
           fields: ["open", "high", "low", "close"],
-          startDate: fromLocalInput(startDate()),
-          endDate: fromLocalInput(endDate()),
+          startDate: chunkStart,
+          endDate: chunkEnd,
           interval: interval(),
           intraDay: false,
           realTime: false
@@ -2819,15 +2833,59 @@ function App() {
         byTs.set(ts, row);
       }
     }
-    const candles = [...byTs.values()]
+    return [...byTs.values()]
       .filter((row) => [row.open, row.high, row.low, row.close].every(Number.isFinite))
       .sort((a, b) => a.time - b.time);
-    candleSeries.setData(candles);
+  }
+
+  async function loadPriceChart() {
+    initPriceChart();
+    if (!candleSeries) throw new Error("Chart engine is still loading. Try Load Chart again in a moment.");
+    setChartStatus("Loading");
+    const exchangeName = exchange();
+    const sym = exchangeName === "MCX"
+      ? mcxMarketSymbol(symbol(), chainExpiry() || rollExpiry())
+      : symbol().trim().toUpperCase();
+    const type = exchangeName === "MCX" && sym.startsWith("FUT_") ? "FUT" : instrumentType();
+
+    // Progressive load: newest 1-hour chunk first (instant first paint), then
+    // backfill older chunks behind it, prepending into a by-time candle map.
+    // Clamp start to the API's 7-day history limit (else HTTP 400).
+    let candleStart = fromLocalInput(startDate());
+    const earliestMs = Date.now() - ROLLING_MAX_HISTORY_DAYS * 86400000;
+    if (candleStart && new Date(candleStart).getTime() < earliestMs) {
+      candleStart = new Date(earliestMs).toISOString();
+    }
+    const ranges = rollingChunkRanges(candleStart, fromLocalInput(endDate()), 1); // newest-first
+    const byTime = new Map();
+    const applyCandles = (fit) => {
+      const candles = [...byTime.values()].sort((a, b) => a.time - b.time);
+      candleSeries.setData(candles);
+      resizeChart(priceChart, priceChartHost);
+      if (fit) priceChart.timeScale().fitContent();
+      setCandleCount(candles.length);
+      return candles.length;
+    };
+
+    setChartStatus("Loading recent 1h");
+    let total = 0;
+    for (let i = 0; i < ranges.length; i += 1) {
+      const range = ranges[i];
+      let candles;
+      try {
+        candles = await fetchCandles(exchangeName, type, sym, range.start, range.end);
+      } catch (error) {
+        if (i === 0) throw error; // first (live edge) chunk failing is fatal
+        continue;
+      }
+      for (const c of candles) byTime.set(c.time, c);
+      total = applyCandles(true);
+      if (i === 0) setChartStatus("Backfilling");
+      else setChartStatus(`Backfilling ${i}/${ranges.length - 1}`);
+      if (i < ranges.length - 1) await new Promise((r) => requestAnimationFrame(() => r()));
+    }
     queueChartResize();
-    resizeChart(priceChart, priceChartHost);
-    priceChart.timeScale().fitContent();
-    setCandleCount(candles.length);
-    setChartStatus(candles.length ? "Ready" : "No data");
+    setChartStatus(total ? "Ready" : "No data");
   }
 
   function normalizeStrike(value) {
@@ -3646,7 +3704,8 @@ function App() {
         } finally {
           completed += 1;
           setRollStatus(`Fetching ${completed}/${batches.length} batches`);
-          await new Promise((resolve) => setTimeout(resolve, 0));
+          // Pace batches so the gateway doesn't 403 us for bursting.
+          await new Promise((resolve) => setTimeout(resolve, ROLLING_BATCH_DELAY_MS));
         }
       }
     };
@@ -3738,50 +3797,39 @@ function App() {
     visit(payload);
   }
 
-  function withPreviewPoint(baseData, time, bid, ask, iv) {
-    const data = baseData.map((series) => series.slice());
-    const x = data[0];
-    let index = x.length - 1;
-    if (index >= 0 && x[index] === time) {
-      data[1][index] = bid;
-      data[2][index] = ask;
-      data[3][index] = iv;
-    } else {
-      x.push(time);
-      data[1].push(bid);
-      data[2].push(ask);
-      data[3].push(iv);
-      // Drawn reference lines live at index 5+ (after the running-avg series).
-      for (let i = 5; i < data.length; i += 1) {
-        const line = rollDrawnLines()[i - 5];
-        data[i].push(line ? line.value : null);
+  // Append (or replace, if same second) one live tick incrementally to the
+  // LightweightCharts series via series.update() — no full rebuild. Then commit
+  // the same point to the columnar source-of-truth buffer (for tooltip/export).
+  function animateRollChartSnapshot(time, target, commit) {
+    if (rollLiveContext) {
+      rollLiveContext.lastValues.bid = target.bid;
+      rollLiveContext.lastValues.ask = target.ask;
+      if (target.ivMid != null) rollLiveContext.lastValues.iv = target.ivMid;
+    }
+    if (rollChart) {
+      const x = rollChartData[0] || [];
+      const lastT = x.length ? x[x.length - 1] : -Infinity;
+      // Running avg incl. this tick — incremental (O(1)), not a full rescan.
+      rollAvgSum += (target.bid + target.ask) / 2;
+      rollAvgCount += 1;
+      const avg = rollAvgCount ? rollAvgSum / rollAvgCount : null;
+      // LWC requires non-decreasing time; update() with an equal time replaces.
+      if (time >= lastT) {
+        // Guard the incremental update so its auto-scroll isn't read as a user pan.
+        rollSyncingWindow += 1;
+        requestAnimationFrame(() => { rollSyncingWindow = Math.max(0, rollSyncingWindow - 1); });
+        const vis = rollSeriesVisibility();
+        if (vis.bid) rollBidSeries?.update({ time, value: target.bid });
+        if (vis.ask) rollAskSeries?.update({ time, value: target.ask });
+        if (vis.avg && avg != null) rollAvgSeries?.update({ time, value: avg });
+        if (vis.iv && target.ivMid != null) rollIvSeries?.update({ time, value: target.ivMid });
+        rollLineSeries.forEach((s, i) => {
+          const line = rollDrawnLines()[i];
+          if (line) s?.update({ time, value: line.value });
+        });
+        if (!rollUserInteracted) setRollChartWindow();
       }
     }
-    // Recompute the running-average series (index 4) over the previewed data.
-    data[4] = computeRunningAvg(data[1], data[2]);
-    return data;
-  }
-
-  function drawRollPreview(data) {
-    if (!rollChart) return;
-    rollChartData = data;
-    rollChart.setData(rollChartData);
-    setRollChartWindow();
-    applyRollManualScales();
-  }
-
-  function animateRollChartSnapshot(time, target, commit) {
-    if (!rollLiveContext || !rollChart) {
-      commit();
-      return;
-    }
-    const baseData = rollChartData.map((series) => series.slice());
-    if (rollLiveContext.frames.live) cancelAnimationFrame(rollLiveContext.frames.live);
-    rollLiveContext.frames.live = null;
-    rollLiveContext.lastValues.bid = target.bid;
-    rollLiveContext.lastValues.ask = target.ask;
-    if (target.ivMid != null) rollLiveContext.lastValues.iv = target.ivMid;
-    drawRollPreview(withPreviewPoint(baseData, time, target.bid, target.ask, target.ivMid));
     commit();
   }
 
@@ -3791,21 +3839,15 @@ function App() {
     const book = refId ? rollLiveContext.orderbookByRef.get(refId) : null;
     const greek = refId ? rollLiveContext.greeksByRef.get(refId) : null;
     const optionTick = refId ? rollLiveContext.optionByRef.get(refId) : null;
-    const fallbackPrice = toRupees(
-      book?.last_traded_price ??
-      book?.ltp ??
-      optionTick?.last_traded_price ??
-      optionTick?.ltp ??
-      greek?.last_traded_price ??
-      greek?.ltp ??
-      row.last_traded_price ??
-      row.ltp
-    );
+    const bid = firstPriceLevel(book?.bids);
+    const ask = firstPriceLevel(book?.asks);
     return {
-      bid: firstPriceLevel(book?.bids) ?? fallbackPrice,
-      ask: firstPriceLevel(book?.asks) ?? fallbackPrice,
+      // LTP is a trade price, not a quote. Using it for both missing sides
+      // collapses the bid/ask lines into one and reports a false zero spread.
+      bid,
+      ask,
       iv: liveIv(greek) ?? liveIv(optionTick) ?? liveIv(row),
-      hasBook: Boolean(book)
+      hasBook: bid != null && ask != null
     };
   }
 
@@ -3839,17 +3881,29 @@ function App() {
       return;
     }
 
+    // Spike guard: reject a live tick whose straddle deviates wildly from the
+    // last accepted value (stale/partial leg quote), matching the history filter.
+    const lastMid = rollLiveContext.lastValues
+      ? (Number(rollLiveContext.lastValues.bid) + Number(rollLiveContext.lastValues.ask)) / 2
+      : NaN;
+    if (Number.isFinite(lastMid) && lastMid > 0 && (best.mid < lastMid * 0.5 || best.mid > lastMid * 2)) {
+      setRollStatus("Live tick rejected (outlier)");
+      return;
+    }
+
     checkStraddleAlerts(best.mid, best.ivMid);
 
     const time = tvTime(receivedAtMs);
     animateRollChartSnapshot(time, best, () => {
+      // Maintain the columnar buffer/export only; the chart was drawn
+      // incrementally inside animateRollChartSnapshot via series.update().
       setRollChartLines(
         [...rollChartLines.bid, { time, value: best.bid }],
         [...rollChartLines.ask, { time, value: best.ask }],
         best.ivMid != null ? [...rollChartLines.iv, { time, value: best.ivMid }] : rollChartLines.iv,
+        false,
         false
       );
-      setRollChartWindow();
 
       const nextRow = {
         ts: receivedAtMs,
@@ -3878,6 +3932,13 @@ function App() {
 
   function scheduleRollLiveUpdate(receivedAtMs) {
     if (!isMarketHours(rollExchange())) { stopRollLive(); setRollStatus("Market closed"); return; }
+    const throttleMs = rollLiveThrottle();
+    // Per-tick mode (0): draw every message immediately, no coalescing.
+    if (!throttleMs) {
+      updateRollLiveSnapshot(receivedAtMs || Date.now());
+      return;
+    }
+    // Throttled mode: coalesce bursts to one draw per window, using the latest tick.
     rollThrottlePending = receivedAtMs || Date.now();
     if (!rollThrottleTimer) {
       rollThrottleTimer = setTimeout(() => {
@@ -3885,7 +3946,7 @@ function App() {
         const ts = rollThrottlePending;
         rollThrottlePending = null;
         updateRollLiveSnapshot(ts);
-      }, 250);
+      }, throttleMs);
     }
   }
 
@@ -4009,13 +4070,15 @@ function App() {
     return `${name || label} ${label}`;
   }
 
-  function toggleRollSeries(key, seriesIndex) {
+  function toggleRollSeries(key) {
     const visible = !rollSeriesVisibility()[key];
     setRollSeriesVisibility((current) => ({ ...current, [key]: visible }));
     const storageKey = key === "iv" ? "Iv" : key[0].toUpperCase() + key.slice(1);
     localStorage.setItem(`nubraRollSeries${storageKey}`, visible ? "1" : "0");
-    rollChart?.setSeries(seriesIndex, { show: visible });
-    rollChart?.redraw();
+    const seriesByKey = { bid: rollBidSeries, ask: rollAskSeries, avg: rollAvgSeries, iv: rollIvSeries };
+    seriesByKey[key]?.applyOptions({ visible });
+    // Re-push so a newly-shown series gets its data (muted series hold none).
+    if (visible) pushRollDataToChart();
   }
 
   function addRollLine() {
@@ -4041,51 +4104,6 @@ function App() {
     rebuildRollChart();
   }
 
-  function initRollChartLegacy() {
-    if (rollChart || !rollChartHost) return;
-    if (!window.LightweightCharts) {
-      window.setTimeout(initRollChart, 100);
-      return;
-    }
-    rollChart = makeChart(rollChartHost, {
-      leftPriceScale: {
-        visible: true,
-        borderColor: "rgba(255,255,255,0.09)",
-        scaleMargins: { top: 0.08, bottom: 0.08 },
-        minimumWidth: 72
-      },
-      rightPriceScale: {
-        visible: true,
-        borderColor: "rgba(255,255,255,0.09)",
-        scaleMargins: { top: 0.08, bottom: 0.08 }
-      }
-    });
-    if (!rollChart) {
-      window.setTimeout(initRollChart, 100);
-      return;
-    }
-
-    const addLine = (opts) => rollChart.addLineSeries
-      ? rollChart.addLineSeries(opts)
-      : rollChart.addSeries(window.LightweightCharts.LineSeries, opts);
-
-    // Bid / Ask on RIGHT axis (₹ price)
-    rollBidSeries = addLine({ color: "#21d19f", lineWidth: 2, title: "Bid", priceScaleId: "right" });
-    rollAskSeries = addLine({ color: "#ffb15c", lineWidth: 2, title: "Ask", priceScaleId: "right" });
-
-    // IV on LEFT axis (% value)
-    rollIvSeries = addLine({
-      color: "#22d3ee",
-      lineWidth: 1,
-      lineStyle: 0,           // solid
-      title: "IV %",
-      priceScaleId: "left",
-      priceFormat: { type: "custom", formatter: (p) => `${p.toFixed(1)}%`, minMove: 0.01 }
-    });
-
-    queueChartResize();
-  }
-
   // Running (cumulative) average of the straddle mid = (bid + ask) / 2.
   // Returns one value per x-point: the mean of every mid seen up to that point.
   function computeRunningAvg(bidArr, askArr) {
@@ -4105,687 +4123,216 @@ function App() {
     return out;
   }
 
-  function rollChartSeriesConfig() {
-    const base = [
-      {},
-      { label: "Bid", scale: "price", show: rollSeriesVisibility().bid, stroke: "#21d19f", width: 1.6, points: { show: false } },
-      { label: "Ask", scale: "price", show: rollSeriesVisibility().ask, stroke: "#ffb15c", width: 1.6, points: { show: false } },
-      { label: "IV %", scale: "iv", show: rollSeriesVisibility().iv, stroke: "#22d3ee", width: 1.2, points: { show: false } },
-      { label: "Avg ₹", scale: "price", show: rollSeriesVisibility().avg, stroke: "#facc15", width: 1.4, dash: [4, 4], points: { show: false } }
-    ];
-    for (const line of rollDrawnLines()) {
-      base.push({
-        label: line.name,
-        scale: line.target === "iv" ? "iv" : "price",
-        stroke: rollLineColor(line.target),
-        width: 1,
-        dash: [7, 5],
-        points: { show: false }
-      });
-    }
-    return base;
+  // LightweightCharts manages its own zoom/pan/scales natively; this resets the
+  // "user interacted" latch so auto-fit resumes on the next load/window change.
+  function clearRollManualScales() {
+    rollUserInteracted = false;
   }
 
-  function clampRange(min, max, hardMin, hardMax, minSpan = 5) {
-    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return { min: hardMin, max: hardMax };
-    let nextMin = min;
-    let nextMax = max;
-    if (nextMax - nextMin < minSpan) {
-      const mid = (nextMin + nextMax) / 2;
-      nextMin = mid - minSpan / 2;
-      nextMax = mid + minSpan / 2;
-    }
-    if (Number.isFinite(hardMin) && nextMin < hardMin) {
-      nextMax += hardMin - nextMin;
-      nextMin = hardMin;
-    }
-    if (Number.isFinite(hardMax) && nextMax > hardMax) {
-      nextMin -= nextMax - hardMax;
-      nextMax = hardMax;
-    }
-    if (Number.isFinite(hardMin)) nextMin = Math.max(hardMin, nextMin);
-    if (Number.isFinite(hardMax)) nextMax = Math.min(hardMax, nextMax);
-    return { min: nextMin, max: nextMax };
-  }
-
-  function rememberRollScale(key, range) {
-    if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max) || range.max <= range.min) return;
-    rollManualScales = { ...rollManualScales, [key]: { min: range.min, max: range.max } };
-  }
-
-  function scaleRangeChanged(current, saved) {
-    if (!current || !saved) return false;
-    return Math.abs(current.min - saved.min) > 1e-9 || Math.abs(current.max - saved.max) > 1e-9;
-  }
-
-  function setRollScale(key, range, manual = false) {
-    if (!rollChart || !range) return;
-    rollChart.setScale(key, range);
-    if (manual) rememberRollScale(key, range);
-  }
-
-  function applyRollManualScales() {
-    if (!rollChart) return;
-    for (const key of ["x", "price", "iv"]) {
-      const range = rollManualScales[key];
-      if (range) rollChart.setScale(key, range);
-    }
-  }
-
-  function scheduleApplyRollManualScales() {
-    if (rollScaleApplyQueued) return;
-    rollScaleApplyQueued = true;
-    requestAnimationFrame(() => {
-      rollScaleApplyQueued = false;
-      applyRollManualScales();
-    });
-  }
-
-  function clearRollManualScales(keys = ["x", "price", "iv"]) {
-    rollManualScales = keys.reduce((next, key) => ({ ...next, [key]: null }), rollManualScales);
-  }
-
-  function createRollInteractionPlugin() {
-    let over;
-    let destroy = () => {};
-    const chartXBounds = () => {
-      const x = rollChartData[0] || [];
-      const dataMin = x[0];
-      const dataMax = x[x.length - 1];
-      const pad = Math.max(30, (dataMax - dataMin) * 0.02);
-      return { min: dataMin - pad, max: dataMax + pad };
-    };
-    const zoomAxis = (u, key, pct, factor, hardMin, hardMax, minSpan) => {
-      const scale = u.scales[key];
-      if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
-      const span = scale.max - scale.min;
-      const anchor = scale.min + span * pct;
-      const nextSpan = span * factor;
-      const range = clampRange(anchor - nextSpan * pct, anchor + nextSpan * (1 - pct), hardMin, hardMax, minSpan);
-      rememberRollScale(key, range);
-      u.setScale(key, range);
-    };
-    const panAxis = (u, key, pctDelta, hardMin, hardMax) => {
-      const scale = u.scales[key];
-      if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
-      const span = scale.max - scale.min;
-      const shift = span * pctDelta;
-      const range = clampRange(scale.min + shift, scale.max + shift, hardMin, hardMax, span);
-      rememberRollScale(key, range);
-      u.setScale(key, range);
-    };
-
-    return {
-      hooks: {
-        ready: [
-          (u) => {
-            over = u.over;
-            const axisEls = [...u.root.querySelectorAll(".u-axis")];
-            let dragStart = null;
-            let axisDragStart = null;
-            const wheel = (event) => {
-              if (!rollChartData[0]?.length) return;
-              event.preventDefault();
-              const rect = over.getBoundingClientRect();
-              const xPct = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-              const yPct = Math.min(1, Math.max(0, 1 - ((event.clientY - rect.top) / rect.height)));
-              const { min: xMin, max: xMax } = chartXBounds();
-
-              if (Math.abs(event.deltaX) > Math.abs(event.deltaY) && !event.ctrlKey && !event.metaKey) {
-                panAxis(u, "x", event.deltaX / rect.width, xMin, xMax);
-                return;
-              }
-
-              const factor = event.deltaY < 0 ? 0.82 : 1.22;
-              const zoomY = event.shiftKey || event.altKey || event.ctrlKey || event.metaKey;
-              const zoomX = !event.shiftKey || event.ctrlKey || event.metaKey;
-              if (zoomX) zoomAxis(u, "x", xPct, factor, xMin, xMax, 10);
-              if (zoomY) {
-                zoomAxis(u, "price", yPct, factor, -Infinity, Infinity, 0.01);
-                zoomAxis(u, "iv", yPct, factor, -Infinity, Infinity, 0.01);
-              }
-            };
-            const axisWheel = (scaleKey) => (event) => {
-              if (!rollChartData[0]?.length) return;
-              event.preventDefault();
-              const rect = event.currentTarget.getBoundingClientRect();
-              const factor = event.deltaY < 0 ? 0.86 : 1.16;
-              if (scaleKey === "x") {
-                const { min, max } = chartXBounds();
-                if (!Number.isFinite(min) || !Number.isFinite(max)) return;
-                const xPct = Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width)));
-                zoomAxis(u, "x", xPct, factor, min, max, 10);
-                return;
-              }
-              const yPct = Math.min(1, Math.max(0, 1 - ((event.clientY - rect.top) / Math.max(1, rect.height))));
-              zoomAxis(u, scaleKey, yPct, factor, -Infinity, Infinity, 0.01);
-            };
-            const pointerDown = (event) => {
-              if (event.button !== 0 || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
-              scheduleApplyRollManualScales();
-              dragStart = {
-                x: event.clientX,
-                y: event.clientY,
-                xMin: u.scales.x.min,
-                xMax: u.scales.x.max,
-                priceMin: u.scales.price?.min,
-                priceMax: u.scales.price?.max,
-                ivMin: u.scales.iv?.min,
-                ivMax: u.scales.iv?.max
-              };
-              over.setPointerCapture?.(event.pointerId);
-            };
-            const pointerMove = (event) => {
-              if (!dragStart || !rollChartData[0]?.length) return;
-              event.preventDefault();
-              const rect = over.getBoundingClientRect();
-              const dx = event.clientX - dragStart.x;
-              const dy = event.clientY - dragStart.y;
-              const { min: xHardMin, max: xHardMax } = chartXBounds();
-              const xSpan = dragStart.xMax - dragStart.xMin;
-              const xShift = -(dx / Math.max(1, rect.width)) * xSpan;
-              const xRange = clampRange(dragStart.xMin + xShift, dragStart.xMax + xShift, xHardMin, xHardMax, xSpan);
-              rememberRollScale("x", xRange);
-              u.setScale("x", xRange);
-
-              const panYScale = (scaleKey, min, max) => {
-                if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return;
-                const span = max - min;
-                const shift = (dy / Math.max(1, rect.height)) * span;
-                const range = clampRange(min + shift, max + shift, -Infinity, Infinity, span);
-                rememberRollScale(scaleKey, range);
-                u.setScale(scaleKey, range);
-              };
-              panYScale("price", dragStart.priceMin, dragStart.priceMax);
-              panYScale("iv", dragStart.ivMin, dragStart.ivMax);
-            };
-            const pointerUp = (event) => {
-              dragStart = null;
-              over.releasePointerCapture?.(event.pointerId);
-              scheduleApplyRollManualScales();
-            };
-            const axisPointerDown = (scaleKey) => (event) => {
-              if (event.button !== 0 || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
-              const scale = u.scales[scaleKey];
-              if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
-              scheduleApplyRollManualScales();
-              axisDragStart = {
-                scaleKey,
-                x: event.clientX,
-                y: event.clientY,
-                min: scale.min,
-                max: scale.max
-              };
-              event.currentTarget.setPointerCapture?.(event.pointerId);
-            };
-            const axisPointerMove = (event) => {
-              if (!axisDragStart || !rollChartData[0]?.length) return;
-              event.preventDefault();
-              const rect = event.currentTarget.getBoundingClientRect();
-              const span = axisDragStart.max - axisDragStart.min;
-              if (axisDragStart.scaleKey === "x") {
-                const dx = event.clientX - axisDragStart.x;
-                const { min, max } = chartXBounds();
-                const mid = (axisDragStart.min + axisDragStart.max) / 2;
-                const factor = Math.exp(-dx / Math.max(120, rect.width));
-                const nextSpan = Math.max(10, span * factor);
-                const range = clampRange(mid - nextSpan / 2, mid + nextSpan / 2, min, max, 10);
-                rememberRollScale("x", range);
-                u.setScale("x", range);
-                return;
-              }
-              const dy = event.clientY - axisDragStart.y;
-              const mid = (axisDragStart.min + axisDragStart.max) / 2;
-              const factor = Math.exp(dy / Math.max(120, rect.height));
-              const nextSpan = Math.max(0.01, span * factor);
-              const range = clampRange(mid - nextSpan / 2, mid + nextSpan / 2, -Infinity, Infinity, 0.01);
-              rememberRollScale(axisDragStart.scaleKey, range);
-              u.setScale(axisDragStart.scaleKey, range);
-            };
-            const axisPointerUp = (event) => {
-              axisDragStart = null;
-              event.currentTarget.releasePointerCapture?.(event.pointerId);
-              scheduleApplyRollManualScales();
-            };
-            const keepManualScale = () => {
-              scheduleApplyRollManualScales();
-            };
-            const axisTooltip = document.createElement("div");
-            axisTooltip.className = "chart-axis-tooltip";
-            axisTooltip.hidden = true;
-            const chartWrap = u.root.querySelector(".u-wrap") || u.root;
-            chartWrap.appendChild(axisTooltip);
-            const axisTitle = (scaleKey) => {
-              if (scaleKey === "x") return "Time axis: drag to expand or squeeze time. Double-click to reset.";
-              if (scaleKey === "iv") return "IV axis: drag to expand or squeeze IV. Double-click to reset.";
-              return "Price axis: drag to expand or squeeze price. Double-click to reset.";
-            };
-            const axisTooltipText = (scaleKey, value) => {
-              if (!Number.isFinite(value)) return "";
-              if (scaleKey === "x") return `Time ${formatIstTime(value)} IST`;
-              if (scaleKey === "iv") return `IV ${value.toFixed(2)}%`;
-              return `Price ${rupee.format(value)}`;
-            };
-            const nextAxisGuideMode = () => {
-              const count = Math.max(0, Number(localStorage.getItem("nubraAxisGuideViews")) || 0);
-              if (count < 3) {
-                const next = count + 1;
-                localStorage.setItem("nubraAxisGuideViews", String(next));
-                return { type: "guide", count: next };
-              }
-              if (localStorage.getItem("nubraAxisHelpPrompted") !== "1") {
-                localStorage.setItem("nubraAxisHelpPrompted", "1");
-                return { type: "help" };
-              }
-              return { type: "value" };
-            };
-            const axisGuidanceText = (item) => {
-              if (item.guideMode?.type === "guide") {
-                return `${axisTitle(item.scale)} Use the mouse wheel to zoom. · Tip ${item.guideMode.count}/3`;
-              }
-              if (item.guideMode?.type === "help") {
-                return "For all chart controls, click the i button in the main header.";
-              }
-              return "";
-            };
-            const showAxisTooltip = (item, event) => {
-              const scale = u.scales[item.scale];
-              if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) return;
-              const rect = item.el.getBoundingClientRect();
-              const pct = item.scale === "x"
-                ? Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width)))
-                : Math.min(1, Math.max(0, 1 - ((event.clientY - rect.top) / Math.max(1, rect.height))));
-              const value = scale.min + (scale.max - scale.min) * pct;
-              axisTooltip.textContent = [axisTooltipText(item.scale, value), axisGuidanceText(item)].filter(Boolean).join("\n");
-              const rootRect = u.root.getBoundingClientRect();
-              axisTooltip.hidden = false;
-              const tipRect = axisTooltip.getBoundingClientRect();
-              const left = Math.min(rootRect.width - tipRect.width - 8, Math.max(8, event.clientX - rootRect.left + 10));
-              const top = Math.min(rootRect.height - tipRect.height - 8, Math.max(8, event.clientY - rootRect.top - 30));
-              axisTooltip.style.left = `${left}px`;
-              axisTooltip.style.top = `${top}px`;
-            };
-            const hideAxisTooltip = (item) => {
-              axisTooltip.hidden = true;
-              if (item) item.guideMode = null;
-            };
-            const doubleClick = () => {
-              clearRollManualScales();
-              setRollChartWindow();
-              u.setScale("price", { min: null, max: null });
-              u.setScale("iv", { min: null, max: null });
-            };
-            const axisHandlers = [
-              { el: u.axes[0]?._el, scale: "x" },
-              { el: u.axes[1]?._el, scale: "iv" },
-              { el: u.axes[2]?._el, scale: "price" }
-            ].filter((item) => item.el);
-            for (const item of axisHandlers) {
-              item.el.classList.add(`roll-axis-${item.scale}`);
-              item.el.title = axisTitle(item.scale);
-              item.wheel = axisWheel(item.scale);
-              item.pointerDown = axisPointerDown(item.scale);
-              item.pointerMove = (event) => {
-                axisPointerMove(event);
-                showAxisTooltip(item, event);
-              };
-              item.pointerEnter = (event) => {
-                item.guideMode = nextAxisGuideMode();
-                showAxisTooltip(item, event);
-              };
-              item.pointerLeave = () => hideAxisTooltip(item);
-              item.el.addEventListener("wheel", item.wheel, { passive: false });
-              item.el.addEventListener("pointerdown", item.pointerDown);
-              item.el.addEventListener("pointermove", item.pointerMove);
-              item.el.addEventListener("pointerup", axisPointerUp);
-              item.el.addEventListener("pointercancel", axisPointerUp);
-              item.el.addEventListener("pointerenter", item.pointerEnter);
-              item.el.addEventListener("pointerleave", item.pointerLeave);
-              item.el.addEventListener("click", keepManualScale);
-              item.el.addEventListener("dblclick", doubleClick);
-            }
-            over.addEventListener("wheel", wheel, { passive: false });
-            over.addEventListener("pointerdown", pointerDown);
-            over.addEventListener("pointermove", pointerMove);
-            over.addEventListener("pointerup", pointerUp);
-            over.addEventListener("pointercancel", pointerUp);
-            over.addEventListener("click", keepManualScale);
-            destroy = () => {
-              for (const item of axisHandlers) {
-                item.el.removeEventListener("wheel", item.wheel);
-                item.el.removeEventListener("pointerdown", item.pointerDown);
-                item.el.removeEventListener("pointermove", item.pointerMove);
-                item.el.removeEventListener("pointerup", axisPointerUp);
-                item.el.removeEventListener("pointercancel", axisPointerUp);
-                item.el.removeEventListener("pointerenter", item.pointerEnter);
-                item.el.removeEventListener("pointerleave", item.pointerLeave);
-                item.el.removeEventListener("click", keepManualScale);
-                item.el.removeEventListener("dblclick", doubleClick);
-              }
-              axisTooltip.remove();
-              over.removeEventListener("wheel", wheel);
-              over.removeEventListener("pointerdown", pointerDown);
-              over.removeEventListener("pointermove", pointerMove);
-              over.removeEventListener("pointerup", pointerUp);
-              over.removeEventListener("pointercancel", pointerUp);
-              over.removeEventListener("click", keepManualScale);
-            };
-          }
-        ],
-        setScale: [
-          (u, key) => {
-            const keys = key ? [key] : ["x", "price", "iv"];
-            for (const scaleKey of keys) {
-              const saved = rollManualScales[scaleKey];
-              if (saved && scaleRangeChanged(u.scales[scaleKey], saved)) {
-                requestAnimationFrame(() => {
-                  const latest = rollManualScales[scaleKey];
-                  if (latest && scaleRangeChanged(u.scales[scaleKey], latest)) u.setScale(scaleKey, latest);
-                });
-              }
-            }
-          }
-        ],
-        destroy: [() => destroy()]
-      }
-    };
-  }
-
-  function paddedRollRange(_u, dataMin, dataMax) {
-    if (!Number.isFinite(dataMin) || !Number.isFinite(dataMax)) return [dataMin, dataMax];
-    const span = Math.max(Math.abs(dataMax - dataMin), Math.abs(dataMax) * 0.002, 0.25);
-    const pad = span * 0.18;
-    return [dataMin - pad, dataMax + pad];
-  }
-
-  function createRollLastValuePlugin() {
-    const labels = [];
-    function makeLabel(className) {
-      const el = document.createElement("div");
-      el.className = `roll-last-label ${className}`;
-      el.hidden = true;
-      return el;
-    }
-    return {
-      hooks: {
-        init: [(u) => {
-          const wrap = u.root.querySelector(".u-wrap") || u.root;
-          const defs = [
-            { cls: "roll-last-bid", key: "bid", color: "#21d19f", series: 1, scale: "price", side: "right" },
-            { cls: "roll-last-ask", key: "ask", color: "#ffb15c", series: 2, scale: "price", side: "right" },
-            { cls: "roll-last-avg", key: "avg", color: "#facc15", series: 4, scale: "price", side: "right" },
-            { cls: "roll-last-iv", key: "iv", color: "#22d3ee", series: 3, scale: "iv", side: "left" },
-            { cls: "roll-last-time", color: "#7b8491", series: 0, scale: "x", side: "bottom" },
-          ];
-          for (const def of defs) {
-            const el = makeLabel(def.cls);
-            el.style.borderColor = def.color;
-            el.style.color = def.color;
-            wrap.appendChild(el);
-            labels.push({ el, ...def });
-          }
-        }],
-        setData: [(u) => { updateLastLabels(u); }],
-        setSeries: [(u) => { updateLastLabels(u); }],
-        setScale: [(u) => { updateLastLabels(u); }],
-        setSize: [(u) => { updateLastLabels(u); }],
-      }
-    };
-    function updateLastLabels(u) {
-      for (const label of labels) {
-        if (label.key && !rollSeriesVisibility()[label.key]) { label.el.hidden = true; continue; }
-        const data = rollChartData[label.series];
-        if (!data?.length) { label.el.hidden = true; continue; }
-        let lastVal = null;
-        for (let i = data.length - 1; i >= 0; i--) {
-          if (Number.isFinite(data[i])) { lastVal = data[i]; break; }
-        }
-        if (lastVal == null) { label.el.hidden = true; continue; }
-        if (label.side === "bottom") {
-          const scale = u.scales.x;
-          if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) { label.el.hidden = true; continue; }
-          const px = u.valToPos(lastVal, "x", true);
-          if (px < 0 || px > u.over.clientWidth) { label.el.hidden = true; continue; }
-          label.el.textContent = formatIstTime(lastVal);
-          label.el.hidden = false;
-          label.el.style.left = `${px}px`;
-          label.el.style.bottom = "0px";
-          label.el.style.top = "";
-          label.el.style.right = "";
-          label.el.style.transform = "translateX(-50%)";
-        } else {
-          const scale = u.scales[label.scale];
-          if (!scale || !Number.isFinite(scale.min) || !Number.isFinite(scale.max)) { label.el.hidden = true; continue; }
-          const px = u.valToPos(lastVal, label.scale, true);
-          if (px < 0 || px > u.over.clientHeight) { label.el.hidden = true; continue; }
-          if (label.scale === "price") {
-            label.el.textContent = Number(lastVal).toFixed(2);
-          } else {
-            label.el.textContent = `${Number(lastVal).toFixed(1)}%`;
-          }
-          label.el.hidden = false;
-          label.el.style.top = `${px}px`;
-          label.el.style.transform = "translateY(-50%)";
-          if (label.side === "right") {
-            label.el.style.right = "0px";
-            label.el.style.left = "";
-          } else {
-            label.el.style.left = "0px";
-            label.el.style.right = "";
-          }
-          label.el.style.bottom = "";
-        }
-      }
-    }
-  }
-
-  function createRollTooltipPlugin() {
-    let tooltip;
-    return {
-      hooks: {
-        init: [(u) => {
-          tooltip = document.createElement("div");
-          tooltip.className = "roll-chart-tooltip";
-          tooltip.hidden = true;
-          u.over.appendChild(tooltip);
-        }],
-        setCursor: [(u) => {
-          if (!tooltip) return;
-          const idx = u.cursor.idx;
-          if (idx == null || idx < 0 || !rollChartData[0]?.length) {
-            tooltip.hidden = true;
-            return;
-          }
-          const time = rollChartData[0][idx];
-          const bid = rollChartData[1]?.[idx];
-          const ask = rollChartData[2]?.[idx];
-          const iv = rollChartData[3]?.[idx];
-          const avg = rollChartData[4]?.[idx];
-          if (!Number.isFinite(time)) { tooltip.hidden = true; return; }
-          const parts = [`<span class="roll-tip-time">${formatIstTime(time)}</span>`];
-          if (rollSeriesVisibility().bid && Number.isFinite(bid)) parts.push(`<span style="color:#21d19f">Bid: ${rupee.format(bid)}</span>`);
-          if (rollSeriesVisibility().ask && Number.isFinite(ask)) parts.push(`<span style="color:#ffb15c">Ask: ${rupee.format(ask)}</span>`);
-          if (rollSeriesVisibility().avg && Number.isFinite(avg)) parts.push(`<span style="color:#facc15">Avg: ${rupee.format(avg)}</span>`);
-          if (rollSeriesVisibility().iv && Number.isFinite(iv)) parts.push(`<span style="color:#22d3ee">IV: ${iv.toFixed(2)}%</span>`);
-          tooltip.innerHTML = parts.join("");
-          tooltip.hidden = false;
-          const left = Math.min(u.over.clientWidth - tooltip.offsetWidth - 12, Math.max(8, u.cursor.left + 14));
-          const top = Math.max(8, Math.min(u.over.clientHeight - tooltip.offsetHeight - 12, u.cursor.top - 42));
-          tooltip.style.left = `${left}px`;
-          tooltip.style.top = `${top}px`;
-        }]
-      }
-    };
-  }
-
-  function createRollCursorAxisPlugin() {
-    let priceLabel, ivLabel;
-    function makeAxisLabel(color) {
-      const el = document.createElement("div");
-      el.className = "roll-cursor-axis-label";
-      el.style.borderColor = color;
-      el.style.color = color;
-      el.hidden = true;
-      return el;
-    }
-    return {
-      hooks: {
-        init: [(u) => {
-          const wrap = u.root.querySelector(".u-wrap") || u.root;
-          priceLabel = makeAxisLabel("#c9cdd3");
-          ivLabel = makeAxisLabel("#22d3ee");
-          wrap.appendChild(priceLabel);
-          wrap.appendChild(ivLabel);
-        }],
-        setCursor: [(u) => {
-          if (!priceLabel || !ivLabel) return;
-          const top = u.cursor.top;
-          if (top == null || top < 0) {
-            priceLabel.hidden = true;
-            ivLabel.hidden = true;
-            return;
-          }
-          const priceScale = u.scales.price;
-          if (priceScale && Number.isFinite(priceScale.min) && Number.isFinite(priceScale.max)) {
-            const val = u.posToVal(top, "price");
-            priceLabel.textContent = `₹${Number(val).toFixed(2)}`;
-            priceLabel.hidden = false;
-            priceLabel.style.top = `${top}px`;
-            priceLabel.style.right = "0px";
-            priceLabel.style.left = "";
-            priceLabel.style.transform = "translateY(-50%)";
-          } else {
-            priceLabel.hidden = true;
-          }
-          const ivScale = u.scales.iv;
-          if (ivScale && Number.isFinite(ivScale.min) && Number.isFinite(ivScale.max)) {
-            const val = u.posToVal(top, "iv");
-            ivLabel.textContent = `${Number(val).toFixed(2)}%`;
-            ivLabel.hidden = false;
-            ivLabel.style.top = `${top}px`;
-            ivLabel.style.left = "0px";
-            ivLabel.style.right = "";
-            ivLabel.style.transform = "translateY(-50%)";
-          } else {
-            ivLabel.hidden = true;
-          }
-        }]
-      }
-    };
-  }
 
   function initRollChart() {
     if (rollChart || !rollChartHost) return;
-    const rect = rollChartHost.getBoundingClientRect();
+    if (!window.LightweightCharts) { window.setTimeout(initRollChart, 100); return; }
     rollReferenceCount = rollDrawnLines().length;
-    const series = rollChartSeriesConfig();
-    rollChartData = rollChartData.slice(0, series.length);
-    while (rollChartData.length < series.length) {
-      rollChartData.push((rollChartData[0] || []).map(() => null));
-    }
-    const axisFont = "12px monospace";
-    rollChart = new uPlot({
+    const rect = rollChartHost.getBoundingClientRect();
+
+    rollChart = makeChart(rollChartHost, {
       width: Math.max(1, Math.floor(rect.width)),
       height: Math.max(280, Math.floor(rect.height)),
-      pxAlign: true,
-      legend: { show: false },
-      cursor: {
-        drag: { x: false, y: false },
-        points: { show: false },
-        focus: { prox: 24 }
+      // Right axis = ₹ (Bid/Ask/Avg), Left axis = IV %.
+      rightPriceScale: {
+        visible: true,
+        borderColor: "rgba(255,255,255,0.09)",
+        scaleMargins: { top: 0.08, bottom: 0.08 }
       },
-      scales: {
-        x: { time: true },
-        price: { auto: true, range: paddedRollRange },
-        iv: { auto: true, range: paddedRollRange }
+      leftPriceScale: {
+        visible: true,
+        borderColor: "rgba(255,255,255,0.09)",
+        scaleMargins: { top: 0.08, bottom: 0.08 }
       },
-      axes: [
-        {
-          show: true,
-          class: "roll-axis-x",
-          size: 44,
-          gap: 6,
-          font: axisFont,
-          stroke: "#c9cdd3",
-          border: { show: true, stroke: "rgba(255,255,255,0.24)", width: 1 },
-          grid: { show: true, stroke: "rgba(255,255,255,0.06)", width: 1 },
-          ticks: { show: true, stroke: "rgba(255,255,255,0.18)", width: 1, size: 5 },
-          values: (_u, vals) => vals.map((v) => formatIstTime(v)),
-          space: 80
-        },
-        {
-          show: true,
-          class: "roll-axis-iv",
-          scale: "iv",
-          side: 3,
-          size: 64,
-          gap: 8,
-          font: axisFont,
-          stroke: "#c4b5fd",
-          border: { show: true, stroke: "rgba(255,255,255,0.24)", width: 1 },
-          grid: { show: false },
-          ticks: { show: true, stroke: "rgba(167,139,250,0.3)", width: 1, size: 5 },
-          values: (_u, vals) => vals.map((v) => `${Number(v).toFixed(1)}%`),
-          space: 40
-        },
-        {
-          show: true,
-          class: "roll-axis-price",
-          scale: "price",
-          side: 1,
-          size: 80,
-          gap: 8,
-          font: axisFont,
-          stroke: "#c9cdd3",
-          border: { show: true, stroke: "rgba(255,255,255,0.24)", width: 1 },
-          grid: { show: true, stroke: "rgba(255,255,255,0.06)", width: 1 },
-          ticks: { show: true, stroke: "rgba(255,255,255,0.18)", width: 1, size: 5 },
-          values: (_u, vals) => vals.map((v) => Number(v).toFixed(2)),
-          space: 40
-        }
-      ],
-      series,
-      plugins: [createRollInteractionPlugin(), createRollTooltipPlugin(), createRollLastValuePlugin(), createRollCursorAxisPlugin()]
-    }, rollChartData, rollChartHost);
-    rollBidSeries = rollAskSeries = rollIvSeries = null;
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: true,
+        // Small gap (in bars) between the latest point and the right price axis.
+        rightOffset: 3,
+        // Allow LWC to compress a full 9:15->EOD session (thousands of points)
+        // into the visible width so "Full" truly fits without horizontal scroll.
+        minBarSpacing: 0.001,
+        barSpacing: 3,
+        // Keep a margin on both ends (we pad the visible range in setRollChartWindow),
+        // so don't pin the edges flush against the axes.
+        fixLeftEdge: false,
+        fixRightEdge: false,
+        lockVisibleTimeRangeOnResize: true,
+        borderColor: "rgba(255,255,255,0.09)",
+        tickMarkFormatter: (time) => formatIstTime(time)
+      },
+      localization: {
+        locale: "en-IN",
+        timeFormatter: (time) => formatIstTime(time),
+        priceFormatter: (p) => Number(p).toFixed(2)
+      }
+    });
+    if (!rollChart) { window.setTimeout(initRollChart, 100); return; }
+
+    const LWC = window.LightweightCharts;
+    const addLine = (opts) => rollChart.addLineSeries
+      ? rollChart.addLineSeries(opts)
+      : rollChart.addSeries(LWC.LineSeries, opts);
+
+    // Bid / Ask / Avg on the RIGHT axis (₹).
+    rollBidSeries = addLine({ color: "#21d19f", lineWidth: 2, priceScaleId: "right", lastValueVisible: true, priceLineVisible: false, title: "Bid" });
+    rollAskSeries = addLine({ color: "#ffb15c", lineWidth: 2, priceScaleId: "right", lastValueVisible: true, priceLineVisible: false, title: "Ask" });
+    rollAvgSeries = addLine({
+      color: "#facc15", lineWidth: 1, priceScaleId: "right",
+      lineStyle: LWC.LineStyle ? LWC.LineStyle.Dashed : 2,
+      lastValueVisible: true, priceLineVisible: false, title: "Avg"
+    });
+    // IV on the LEFT axis (%).
+    rollIvSeries = addLine({
+      color: "#22d3ee", lineWidth: 1, priceScaleId: "left",
+      lastValueVisible: true, priceLineVisible: false, title: "IV",
+      priceFormat: { type: "custom", formatter: (p) => `${Number(p).toFixed(1)}%`, minMove: 0.01 }
+    });
+
+    // User-drawn reference lines: one line series each, on its own axis.
+    rollLineSeries = rollDrawnLines().map((line) => {
+      const onIv = line.target === "iv";
+      return addLine({
+        color: rollLineColor(line.target),
+        lineWidth: 1,
+        lineStyle: LWC.LineStyle ? LWC.LineStyle.Dashed : 2,
+        priceScaleId: onIv ? "left" : "right",
+        lastValueVisible: false,
+        priceLineVisible: false,
+        title: line.name
+      });
+    });
+
+    // Auto-fit suppression once the user zooms/pans the time scale.
+    rollChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+      if (rollSyncingWindow) return;
+      rollUserInteracted = true;
+    });
+
+    pushRollDataToChart();
     queueChartResize();
+  }
+
+  // Max points to render per series. Beyond this we downsample, because the chart
+  // is only ~1-2k pixels wide — drawing 20k points at Full zoom just causes lag
+  // with no visible benefit. min/max bucketing preserves spikes and the envelope.
+  const ROLL_RENDER_CAP = 4000;
+
+  // min/max-per-bucket downsample: keeps the high and low of each bucket so the
+  // line's shape and any spikes survive. Returns ascending {time,value} points.
+  function downsampleMinMax(points, cap) {
+    const n = points.length;
+    if (n <= cap) return points;
+    const buckets = Math.max(1, Math.floor(cap / 2));
+    const size = n / buckets;
+    const out = [];
+    for (let b = 0; b < buckets; b += 1) {
+      const start = Math.floor(b * size);
+      const end = Math.min(n, Math.floor((b + 1) * size));
+      if (end <= start) continue;
+      let minP = points[start], maxP = points[start];
+      for (let i = start + 1; i < end; i += 1) {
+        const v = points[i].value;
+        if (v < minP.value) minP = points[i];
+        if (v > maxP.value) maxP = points[i];
+      }
+      // Emit in time order so output stays strictly ascending.
+      if (minP.time <= maxP.time) { out.push(minP); if (maxP !== minP) out.push(maxP); }
+      else { out.push(maxP); out.push(minP); }
+    }
+    // Guarantee strictly ascending unique time after bucketing.
+    const dedup = [];
+    let prevT = -Infinity;
+    for (const p of out) { if (p.time > prevT) { dedup.push(p); prevT = p.time; } }
+    return dedup;
+  }
+
+  // Convert the columnar rollChartData buffer into per-series {time,value} arrays
+  // and push to the LightweightCharts series. Whitespace points are dropped per
+  // series (LWC ignores gaps, drawing a continuous line across them).
+  function pushRollDataToChart() {
+    if (!rollChart) return;
+    // Guard the bulk setData (which makes LWC auto-fit and fire the range-change
+    // listener) so it isn't mistaken for a user zoom/pan.
+    rollSyncingWindow += 1;
+    requestAnimationFrame(() => { rollSyncingWindow = Math.max(0, rollSyncingWindow - 1); });
+    const x = rollChartData[0] || [];
+    const toPoints = (col, visible) => {
+      if (!visible || !col) return [];
+      const out = [];
+      let prevT = -Infinity;
+      for (let i = 0; i < x.length; i += 1) {
+        const t = x[i];
+        const v = col[i];
+        if (!Number.isFinite(t) || !Number.isFinite(v)) continue;
+        if (t <= prevT) continue;       // LWC requires strictly ascending unique time
+        out.push({ time: t, value: v });
+        prevT = t;
+      }
+      return downsampleMinMax(out, ROLL_RENDER_CAP);
+    };
+    const vis = rollSeriesVisibility();
+    rollBidSeries?.setData(toPoints(rollChartData[1], vis.bid));
+    rollAskSeries?.setData(toPoints(rollChartData[2], vis.ask));
+    rollIvSeries?.setData(toPoints(rollChartData[3], vis.iv));
+    rollAvgSeries?.setData(toPoints(rollChartData[4], vis.avg));
+    rollLineSeries.forEach((s, i) => s?.setData(toPoints(rollChartData[5 + i], true)));
   }
 
   function rebuildRollChart() {
     if (rollChart) {
-      rollChart.destroy();
+      rollChart.remove();
       rollChart = null;
+      rollBidSeries = rollAskSeries = rollAvgSeries = rollIvSeries = null;
+      rollLineSeries = [];
     }
     initRollChart();
     setRollChartLines(rollChartLines.bid, rollChartLines.ask, rollChartLines.iv, false);
   }
 
+  // Apply the selected time window to the LightweightCharts time scale.
+  // "full" fits the entire session (9:15 -> latest) at a glance; the timed
+  // modes show the trailing span ending at the latest point. Programmatic
+  // changes are wrapped so they don't count as a user zoom/pan.
   function setRollChartWindow(mode = rollWindowMode()) {
     if (!rollChart || !rollChartData[0]?.length) return;
-    if (rollManualScales.x) {
-      rollChart.setScale("x", rollManualScales.x);
-      return;
-    }
     const x = rollChartData[0];
     const minAll = x[0];
     const maxAll = x[x.length - 1];
     const spans = { "30m": 30 * 60, "1h": 60 * 60, "3h": 3 * 60 * 60 };
-    const visibleSpan = mode === "full" || !spans[mode] ? Math.max(1, maxAll - minAll) : spans[mode];
-    const pad = Math.max(30, visibleSpan * 0.018);
-    if (mode === "full" || !spans[mode]) {
-      setRollScale("x", { min: minAll - pad, max: maxAll + pad });
-      return;
+    const timeScale = rollChart.timeScale();
+    rollSyncingWindow += 1;
+    try {
+      if (mode === "full" || !spans[mode]) {
+        // Show the whole session (9:15 -> latest) with a margin on both ends so
+        // the first/last points aren't jammed against the left/right axes.
+        const span = Math.max(1, maxAll - minAll);
+        const pad = Math.max(30, span * 0.02);
+        timeScale.setVisibleRange({ from: minAll - pad, to: maxAll + pad });
+      } else {
+        const span = spans[mode];
+        const pad = Math.max(15, span * 0.02);
+        const from = Math.max(minAll - pad, maxAll - span);
+        timeScale.setVisibleRange({ from, to: maxAll + pad });
+      }
+    } catch {} finally {
+      requestAnimationFrame(() => { rollSyncingWindow = Math.max(0, rollSyncingWindow - 1); });
     }
-    setRollScale("x", { min: Math.max(minAll - pad, maxAll - spans[mode]), max: maxAll + pad });
   }
 
   function setRollChartWindowMode(mode) {
-    clearRollManualScales(["x"]);
+    rollUserInteracted = false;
     setRollWindowMode(mode);
     setRollChartWindow(mode);
   }
 
-  function setRollChartLines(bidLine, askLine, ivLine, applyWindow = true) {
+  function setRollChartLines(bidLine, askLine, ivLine, applyWindow = true, pushChart = true) {
     rollChartLines = { bid: bidLine || [], ask: askLine || [], iv: ivLine || [] };
     const times = new Set();
     const bidByTime = new Map();
@@ -4817,23 +4364,144 @@ function App() {
       data.push(x.map(() => line.value));
     }
     rollChartData = data;
+    // Re-seed the incremental running-average accumulator from the full set so
+    // subsequent live ticks extend it in O(1).
+    rollAvgSum = 0; rollAvgCount = 0;
+    for (let i = 0; i < bidArr.length; i += 1) {
+      const b = Number(bidArr[i]), a = Number(askArr[i]);
+      if (Number.isFinite(b) && Number.isFinite(a)) { rollAvgSum += (b + a) / 2; rollAvgCount += 1; }
+    }
+    // Drawn-line count changed -> series set differs; rebuild the chart.
     if (rollChart && rollReferenceCount !== rollDrawnLines().length) {
       rebuildRollChart();
       return;
     }
     initRollChart();
     if (!rollChart) return;
-    rollChart.setData(rollChartData);
+    // Live ticks already drew incrementally via series.update(); skip full push.
+    if (!pushChart) return;
+    pushRollDataToChart();
     resizeChart(rollChart, rollChartHost);
-    if (applyWindow) setRollChartWindow();
-    applyRollManualScales();
+    if (applyWindow && !rollUserInteracted) {
+      setRollChartWindow();
+      // Re-fit on the next frame: the first fit can run before LWC has laid out
+      // the freshly-set data, leaving the full session not fully fitted.
+      requestAnimationFrame(() => { if (!rollUserInteracted) setRollChartWindow(); });
+    }
+  }
+
+  // Compute straddle (min-mid ATM±2) bid/ask/iv points for a set of spot points,
+  // given fetched option series. Pure transform — used by both the initial load
+  // and the progressive backfill chunks. Returns { bidLine, askLine, ivLine, selected }.
+  function computeStraddlePoints(spotPoints, seriesByName, strikes, step, rowByKey) {
+    const cursorByName = new Map();
+    const bidLine = [];
+    const askLine = [];
+    const ivLine = [];
+    const selected = [];
+    // Running median-ish reference of recently accepted straddle mids, used to
+    // reject single-tick outliers (a strike whose summed quote collapsed because
+    // one leg had a stale near-zero quote — the spike in the chart).
+    const recentMids = [];
+    const refMid = () => {
+      if (!recentMids.length) return null;
+      const sorted = [...recentMids].sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)];
+    };
+    for (const point of spotPoints) {
+      const atm = nearestStrike(point.spot, strikes, step);
+      let best = null;
+      for (let offset = -2; offset <= 2; offset++) {
+        const strike = nearestStrike(atm + offset * step, strikes, step);
+        const ce = rowByKey.get(`${strike}|CE`);
+        const pe = rowByKey.get(`${strike}|PE`);
+        if (!ce || !pe) continue;
+        const ceQuote = advanceQuote(ce.name, seriesByName, cursorByName, point.ts);
+        const peQuote = advanceQuote(pe.name, seriesByName, cursorByName, point.ts);
+        // Require BOTH legs to have a real bid AND ask. A leg whose bid or ask is
+        // missing/near-zero while its pair is normal is a stale/partial quote;
+        // summing it produces a garbage (tiny) straddle that creates a spike.
+        if (!isSaneLegQuote(ceQuote) || !isSaneLegQuote(peQuote)) continue;
+        const bid = ceQuote.bid + peQuote.bid;
+        const ask = ceQuote.ask + peQuote.ask;
+        if (bid <= 0 || ask <= 0) continue;
+        const mid = (bid + ask) / 2;
+        const ceIvMid = ceQuote.ivMid != null
+          ? ceQuote.ivMid
+          : (ceQuote.ivBid != null && ceQuote.ivAsk != null) ? (ceQuote.ivBid + ceQuote.ivAsk) / 2 : null;
+        const peIvMid = peQuote.ivMid != null
+          ? peQuote.ivMid
+          : (peQuote.ivBid != null && peQuote.ivAsk != null) ? (peQuote.ivBid + peQuote.ivAsk) / 2 : null;
+        let ivMid = null;
+        if (ceIvMid != null && peIvMid != null) ivMid = ((ceIvMid + peIvMid) / 2) * 100;
+        else if (ceIvMid != null) ivMid = ceIvMid * 100;
+        else if (peIvMid != null) ivMid = peIvMid * 100;
+        if (!best || mid < best.mid) best = { strike, bid, ask, mid, ivMid };
+      }
+      if (!best) continue;
+      // Spike guard: drop a point that deviates wildly from the recent level.
+      const ref = refMid();
+      if (ref != null && (best.mid < ref * 0.5 || best.mid > ref * 2)) continue;
+      recentMids.push(best.mid);
+      if (recentMids.length > 20) recentMids.shift();
+      bidLine.push({ time: tvTime(point.ts), value: best.bid });
+      askLine.push({ time: tvTime(point.ts), value: best.ask });
+      if (best.ivMid != null && best.ivMid > 0) ivLine.push({ time: tvTime(point.ts), value: best.ivMid });
+      selected.push({ ...point, ...best });
+    }
+    return { bidLine, askLine, ivLine, selected };
+  }
+
+  // A leg quote is usable only if it has a positive bid AND ask. (A near-zero or
+  // missing side means a stale/partial quote that would corrupt the straddle.)
+  function isSaneLegQuote(q) {
+    return q && Number.isFinite(q.bid) && Number.isFinite(q.ask) && q.bid > 0 && q.ask > 0;
+  }
+
+  // Fetch option series for one time window and compute its straddle points.
+  // Used to progressively backfill older 1-hour chunks behind the live view.
+  async function loadRollingChunk(optionNames, chunkStart, chunkEnd, aliasToCanonical, intervalValue, spotPoints, strikes, step, rowByKey) {
+    const inChunk = spotPoints.filter((p) => {
+      const iso = new Date(p.ts).toISOString();
+      return iso >= chunkStart && iso <= chunkEnd;
+    });
+    if (!inChunk.length) return { bidLine: [], askLine: [], ivLine: [], selected: [] };
+    let seriesByName = await fetchRollingSeries(optionNames, chunkStart, chunkEnd, aliasToCanonical, intervalValue);
+    if (!seriesByName.size && intervalValue !== "1m") {
+      seriesByName = await fetchRollingSeries(optionNames, chunkStart, chunkEnd, aliasToCanonical, "1m");
+    }
+    if (!seriesByName.size) return { bidLine: [], askLine: [], ivLine: [], selected: [] };
+    return computeStraddlePoints(inChunk, seriesByName, strikes, step, rowByKey);
+  }
+
+  // Split [start,end] ISO range into chunks of `hours` length, newest-first.
+  function rollingChunkRanges(start, end, hours = 1) {
+    const startMs = new Date(start).getTime();
+    const endMs = new Date(end).getTime();
+    const span = hours * 3600 * 1000;
+    const ranges = [];
+    let hi = endMs;
+    while (hi > startMs) {
+      const lo = Math.max(startMs, hi - span);
+      ranges.push({ start: new Date(lo).toISOString(), end: new Date(hi).toISOString() });
+      hi = lo;
+    }
+    return ranges; // already newest-first
   }
 
   async function loadRollingStraddle() {
     initRollChart();
-    const start = fromLocalInput(rollStart());
+    let start = fromLocalInput(rollStart());
     const end = fromLocalInput(rollEnd());
     if (!start || !end) throw new Error("Rolling start and end are required.");
+
+    // Nubra rejects history older than ROLLING_MAX_HISTORY_DAYS with HTTP 400.
+    // Clamp the start so the request stays within the allowed window.
+    const earliestMs = Date.now() - ROLLING_MAX_HISTORY_DAYS * 86400000;
+    if (new Date(start).getTime() < earliestMs) {
+      start = new Date(earliestMs).toISOString();
+      setRollStatus(`Start clamped to last ${ROLLING_MAX_HISTORY_DAYS} days`);
+    }
 
     clearRollManualScales();
     setRollStatus("Spot");
@@ -4968,88 +4636,89 @@ function App() {
         live: null
       }
     };
+    // ── Progressive load: newest 1-hour chunk first (fast first paint) ───────
+    // then connect the live WebSocket, then backfill older chunks behind it.
+    const uniqueNames = [...new Set(optionNames)];
+    const chunkRanges = rollingChunkRanges(start, end, 1); // newest-first
+    if (!chunkRanges.length) throw new Error("Empty rolling time range.");
+
+    let accSelected = [];
+    let accBid = [];
+    let accAsk = [];
+    let accIv = [];
+    const applyAccumulated = (applyWindow) => {
+      // Union with any live ticks that arrived during backfill so they aren't
+      // dropped from the buffer. setRollChartLines de-dupes by time.
+      setRollChartLines(
+        [...accBid, ...rollChartLines.bid],
+        [...accAsk, ...rollChartLines.ask],
+        [...accIv, ...rollChartLines.iv],
+        applyWindow
+      );
+    };
+    const refreshStats = (interval) => {
+      if (!accSelected.length) return;
+      const last = accSelected[accSelected.length - 1];
+      const lastIv = accIv.length ? accIv[accIv.length - 1].value : null;
+      if (rollLiveContext) {
+        rollLiveContext.strikes = strikes;
+        rollLiveContext.step = step;
+        rollLiveContext.rowByKey = rowByKey;
+        rollLiveContext.refIds = [...liveRefIds];
+        rollLiveContext.spotSymbol = spotSym;
+        rollLiveContext.spot = last.spot;
+        rollLiveContext.points = accSelected.length;
+        rollLiveContext.lastValues = { bid: last.bid, ask: last.ask, iv: lastIv };
+      }
+      setRollStats({
+        spot: rupee.format(last.spot),
+        strike: number.format(last.strike),
+        bid: rupee.format(last.bid),
+        ask: rupee.format(last.ask),
+        iv: lastIv != null ? `${lastIv.toFixed(1)}%` : "--",
+        points: String(accSelected.length),
+        meta: `${sym} ${rollExpiry()} | ${interval} quotes | ${requiredStrikes.size} strikes | ${rollExchange()}`
+      });
+      setRollExportData(accSelected);
+    };
+
+    // 1) Newest chunk — render immediately for an HFT-style instant first paint.
+    setRollStatus("Loading recent 1h");
+    const newest = chunkRanges[0];
+    const head = await loadRollingChunk(uniqueNames, newest.start, newest.end, aliasToCanonical, resolvedInterval, spotPoints, strikes, step, rowByKey);
+    if (head.selected.length) {
+      accBid = head.bidLine; accAsk = head.askLine; accIv = head.ivLine; accSelected = head.selected;
+      applyAccumulated(true);
+      refreshStats(resolvedInterval);
+      setRollStatus("Live arming");
+    }
+
+    // 2) REST done for the live edge -> NOW connect the WebSocket.
     if (!rollLiveSocket) startRollLive();
 
-    let seriesByName = await fetchRollingSeries([...new Set(optionNames)], start, end, aliasToCanonical, resolvedInterval);
-    if (!seriesByName.size && resolvedInterval !== "1m") {
-      const fallbackSeries = await fetchRollingSeries([...new Set(optionNames)], start, end, aliasToCanonical, "1m");
-      if (fallbackSeries.size) {
-        seriesByName = fallbackSeries;
-        resolvedInterval = "1m";
-      }
+    // 3) Backfill older chunks sequentially, prepending behind the live view.
+    //    Yield to the event loop between chunks so the UI stays buttery smooth.
+    for (let i = 1; i < chunkRanges.length; i += 1) {
+      const range = chunkRanges[i];
+      setRollStatus(`Backfilling ${i}/${chunkRanges.length - 1}`);
+      let chunk;
+      try {
+        chunk = await loadRollingChunk(uniqueNames, range.start, range.end, aliasToCanonical, resolvedInterval, spotPoints, strikes, step, rowByKey);
+      } catch { continue; }
+      if (!chunk.selected.length) continue;
+      // Prepend older points; setRollChartLines merges + sorts by time.
+      accBid = [...chunk.bidLine, ...accBid];
+      accAsk = [...chunk.askLine, ...accAsk];
+      accIv = [...chunk.ivLine, ...accIv];
+      accSelected = [...chunk.selected, ...accSelected];
+      // Don't snap the window while backfilling unless user hasn't interacted.
+      applyAccumulated(!rollUserInteracted);
+      refreshStats(resolvedInterval);
+      await new Promise((r) => requestAnimationFrame(() => r()));
     }
-    if (!seriesByName.size) {
-      throw new Error(`No option chart series returned for ${rollExchange()} ${sym} ${rollExpiry()} using refdata symbols.`);
-    }
-    const cursorByName = new Map();
-    const bidLine = [];
-    const askLine = [];
-    const ivLine = [];
-    const selected = [];
 
-    for (const point of spotPoints) {
-      const atm = nearestStrike(point.spot, strikes, step);
-      let best = null;
-      for (let offset = -2; offset <= 2; offset++) {
-        const strike = nearestStrike(atm + offset * step, strikes, step);
-        const ce = rowByKey.get(`${strike}|CE`);
-        const pe = rowByKey.get(`${strike}|PE`);
-        if (!ce || !pe) continue;
-        const ceQuote = advanceQuote(ce.name, seriesByName, cursorByName, point.ts);
-        const peQuote = advanceQuote(pe.name, seriesByName, cursorByName, point.ts);
-        const bid = ceQuote.bid + peQuote.bid;
-        const ask = ceQuote.ask + peQuote.ask;
-        if (bid <= 0 || ask <= 0) continue;
-        const mid = (bid + ask) / 2;
-        // average IV mid across CE+PE (multiply by 100 for percentage display)
-        const ceIvMid = ceQuote.ivMid != null
-          ? ceQuote.ivMid
-          : (ceQuote.ivBid != null && ceQuote.ivAsk != null) ? (ceQuote.ivBid + ceQuote.ivAsk) / 2 : null;
-        const peIvMid = peQuote.ivMid != null
-          ? peQuote.ivMid
-          : (peQuote.ivBid != null && peQuote.ivAsk != null) ? (peQuote.ivBid + peQuote.ivAsk) / 2 : null;
-        let ivMid = null;
-        if (ceIvMid != null && peIvMid != null) ivMid = ((ceIvMid + peIvMid) / 2) * 100;
-        else if (ceIvMid != null) ivMid = ceIvMid * 100;
-        else if (peIvMid != null) ivMid = peIvMid * 100;
-        if (!best || mid < best.mid) best = { strike, bid, ask, mid, ivMid };
-      }
-      if (!best) continue;
-      bidLine.push({ time: tvTime(point.ts), value: best.bid });
-      askLine.push({ time: tvTime(point.ts), value: best.ask });
-      if (best.ivMid != null && best.ivMid > 0) ivLine.push({ time: tvTime(point.ts), value: best.ivMid });
-      selected.push({ ...point, ...best });
-    }
-    if (!selected.length) throw new Error("No complete bid/ask straddle points found.");
-
-    setRollChartLines(bidLine, askLine, ivLine);
-
-    const last = selected[selected.length - 1];
-    const lastIv = ivLine.length ? ivLine[ivLine.length - 1].value : null;
-    if (rollLiveContext) {
-      rollLiveContext.strikes = strikes;
-      rollLiveContext.step = step;
-      rollLiveContext.rowByKey = rowByKey;
-      rollLiveContext.refIds = [...liveRefIds];
-      rollLiveContext.spotSymbol = spotSym;
-      rollLiveContext.spot = last.spot;
-      rollLiveContext.points = selected.length;
-      rollLiveContext.lastValues = {
-        bid: last.bid,
-        ask: last.ask,
-        iv: lastIv
-      };
-    }
-    setRollStats({
-      spot: rupee.format(last.spot),
-      strike: number.format(last.strike),
-      bid: rupee.format(last.bid),
-      ask: rupee.format(last.ask),
-      iv: lastIv != null ? `${lastIv.toFixed(1)}%` : "--",
-      points: String(selected.length),
-      meta: `${sym} ${rollExpiry()} | ${resolvedInterval} quotes | ${requiredStrikes.size} strikes checked | ${rollExchange()}`
-    });
-    setRollExportData(selected);
+    if (!accSelected.length) throw new Error("No complete bid/ask straddle points found.");
+    refreshStats(resolvedInterval);
     setRollStatus("Ready");
     if (!rollLiveSocket) startRollLive();
   }
@@ -5264,8 +4933,17 @@ function App() {
   });
 
   createEffect(() => {
-    section();
+    const sec = section();
     queueChartResize();
+    // The Rolling chart is sized from its host; when the view first becomes
+    // visible its size may have been 0 at init, so re-fit the window once it
+    // has real dimensions (unless the user has manually zoomed/panned).
+    if (sec === "rolling" && rollChart && !rollUserInteracted) {
+      requestAnimationFrame(() => {
+        resizeChart(rollChart, rollChartHost);
+        setRollChartWindow();
+      });
+    }
   });
 
   createEffect(() => {
@@ -5566,6 +5244,7 @@ function App() {
     // actions
     run, loadOiTsSeries, startChainLive, stopChainLive, loadIvTermStructure, loadOptionChain,
     loadChainSearchRows, removeRollLine, toggleRollSeries,
+    rollLiveThrottle, setRollLiveThrottle,
     straddleMonitor, setStraddleMonitor, straddleAlerts, setStraddleAlerts,
     chainMonitor, setChainMonitor, chainAlerts, setChainAlerts,
     spotMonitor, setSpotMonitor, spotAlerts,

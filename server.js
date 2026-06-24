@@ -317,12 +317,24 @@ async function proxy(req, res) {
     });
 
     const responseBody = Buffer.from(await upstream.arrayBuffer());
+    // Log upstream auth/permission failures with their detail so the cause of a
+    // 401/403/429 (expired session, wrong env, rate limit) is visible.
+    if (upstream.status >= 400) {
+      liveLog("proxy-upstream-error", {
+        status: upstream.status,
+        target: `${target.host}${target.pathname}`,
+        hasAuth: Boolean(headers.authorization),
+        hasDeviceId: Boolean(headers["x-device-id"]),
+        detail: responseBody.toString("utf8").slice(0, 300)
+      });
+    }
     res.writeHead(upstream.status, {
       "content-type": upstream.headers.get("content-type") || "application/octet-stream",
       "cache-control": "no-store"
     });
     res.end(responseBody);
   } catch (error) {
+    liveLog("proxy-exception", { message: error.message, target: String(req.url).slice(0, 200) });
     sendJson(res, 502, { error: error.message || "Proxy request failed." });
   }
 }
