@@ -9,8 +9,9 @@ export function MarketView() {
     section, busy, authed,
     symbol, instrumentType, exchange, interval, startDate, endDate,
     spot, change, candleCount, chartStatus,
+    smartOiIndicatorEnabled,
     setSymbol, setInstrumentType, setExchange, setIntervalValue, setStartDate, setEndDate,
-    run, loadSpotPrice, loadPriceChart, registerPriceChartHost,
+    run, loadSpotPrice, loadPriceChart, toggleSmartOiIndicator, registerPriceChartHost,
   } = useApp();
 
   return (
@@ -97,9 +98,18 @@ export function MarketView() {
               <h2 class="chart-card-title">{symbol()}</h2>
               <p class="chart-card-meta">{interval()} · Price candles · IST</p>
             </div>
-            <div class="flex items-center gap-1.5 text-[10px] font-semibold" style="letter-spacing:0">
+            <div class="flex items-center gap-2 text-[10px] font-semibold" style="letter-spacing:0">
+              <button
+                data-ui="button"
+                data-appearance={smartOiIndicatorEnabled() ? "accent" : "outline"}
+                onClick={() => run(toggleSmartOiIndicator)}
+                disabled={busy() || !authed()}
+                title="Add/remove Smart OI indicator"
+              >
+                Smart OI
+              </button>
               <span class={`h-1.5 w-1.5 rounded-full ${authed() ? "bg-emerald-400" : "bg-amber-400"}`}></span>
-              <span style={`color:${authed() ? "#34d399" : "#fbbf24"}`}>{authed() ? "Live" : "No session"}</span>
+              <span style={`color:${authed() ? "#34d399" : "#8B5CF6"}`}>{authed() ? "Live" : "No session"}</span>
             </div>
           </div>
           <div class="chart-card-body" ref={(el) => registerPriceChartHost(el)}></div>

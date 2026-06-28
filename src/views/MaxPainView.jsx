@@ -25,18 +25,18 @@ export function MaxPainView() {
     const mpIdx = d.pain.findIndex((p) => p.strike === d.maxPainStrike);
     const spotIdx = d.spot != null ? d.pain.reduce((best, p, i) => Math.abs(p.strike - d.spot) < Math.abs(d.pain[best].strike - d.spot) ? i : best, 0) : -1;
     const plotLines = [];
-    if (mpIdx >= 0) plotLines.push({ value: mpIdx, color: "rgba(245,158,11,0.8)", dashStyle: "ShortDash", width: 2, label: { text: `Max Pain ${number.format(d.maxPainStrike)}`, style: { color: "#f59e0b", fontSize: "10px" }, align: "right" } });
-    if (spotIdx >= 0) plotLines.push({ value: spotIdx, color: "rgba(255,255,255,0.5)", dashStyle: "Dot", width: 1, label: { text: "Spot", style: { color: "#b4b4c8", fontSize: "10px" } } });
+    if (mpIdx >= 0) plotLines.push({ value: mpIdx, color: "rgba(139,92,246,0.8)", dashStyle: "ShortDash", width: 2, label: { text: `Max Pain ${number.format(d.maxPainStrike)}`, style: { color: "#8B5CF6", fontSize: "10px" }, align: "right" } });
+    if (spotIdx >= 0) plotLines.push({ value: spotIdx, color: "rgba(68,80,94,0.90)", dashStyle: "Dot", width: 1, label: { text: "Spot", style: { color: "#D7DEE8", fontSize: "10px" } } });
     return Highcharts.chart(host, {
       chart: { type: "column", backgroundColor: "transparent", animation: false, spacing: [12, 16, 8, 8] },
       title: { text: undefined }, credits: { enabled: false },
-      legend: { itemStyle: { color: "#b4b4c8", fontSize: "10px" }, itemHoverStyle: { color: "#f0f0f4" } },
-      xAxis: { categories, plotLines, labels: { style: { color: "#8c8ca0", fontSize: "10px" }, rotation: -45 } },
-      yAxis: { title: { text: undefined }, labels: { style: { color: "#8c8ca0", fontSize: "10px" }, formatter: function () { return compactNumber.format(this.value); } }, gridLineColor: "rgba(255,255,255,0.06)" },
+      legend: { itemStyle: { color: "#D7DEE8", fontSize: "10px" }, itemHoverStyle: { color: "#D7DEE8" } },
+      xAxis: { categories, plotLines, labels: { style: { color: "#9CA8B8", fontSize: "10px" }, rotation: -45 } },
+      yAxis: { title: { text: undefined }, labels: { style: { color: "#9CA8B8", fontSize: "10px" }, formatter: function () { return compactNumber.format(this.value); } }, gridLineColor: "rgba(68,80,94,0.35)" },
       tooltip: { shared: true, useHTML: true, formatter: function () { const rows = this.points.map((pt) => `<span style="color:${pt.color}">●</span> ${pt.series.name}: <b>${compactNumber.format(pt.y)}</b>`).join("<br>"); return `<b>${this.x}</b><br>${rows}`; } },
       plotOptions: { series: { animation: false, borderWidth: 0 }, column: { stacking: "normal", groupPadding: 0, pointPadding: 0.01 } },
       series: [
-        { name: "Call Pain", data: d.pain.map((p) => p.callPain), color: "rgba(34,197,94,0.65)", stack: "pain" },
+        { name: "Call Pain", data: d.pain.map((p) => p.callPain), color: "rgba(16,185,129,0.65)", stack: "pain" },
         { name: "Put Pain", data: d.pain.map((p) => p.putPain), color: "rgba(239,68,68,0.65)", stack: "pain" },
       ]
     });
@@ -63,7 +63,7 @@ export function MaxPainView() {
             <div class="chain-toolbar-divider" />
             <button data-ui="button" data-appearance="accent" onClick={() => run(loadOptionChain)} disabled={busy()}>Load</button>
             <Show when={chainLive()} fallback={<button data-ui="button" data-appearance="outline" onClick={startChainLive} disabled={busy() || !authed()}>Live</button>}>
-              <button data-ui="button" data-appearance="outline" onClick={stopChainLive} style="border-color:rgba(240,79,79,0.4);color:var(--bear)">Stop</button>
+              <button data-ui="button" data-appearance="outline" onClick={stopChainLive} style="border-color:rgba(239,68,68,0.4);color:var(--bear)">Stop</button>
             </Show>
           </div>
           <div class="chain-toolbar-right">
@@ -86,7 +86,7 @@ export function MaxPainView() {
             <div class="gamma-chart-head">
               <div><strong>Max Pain Distribution</strong><span>Call pain + Put pain per expiry strike · Min total = Max Pain</span></div>
               <Show when={maxPain().maxPainStrike != null}>
-                <span class="gamma-peak-chip" style="background:rgba(245,158,11,0.12);border-color:rgba(245,158,11,0.3);color:var(--warn)">
+                <span class="gamma-peak-chip" style="background:rgba(139,92,246,0.12);border-color:rgba(139,92,246,0.3);color:var(--warn)">
                   Pain @ {number.format(maxPain().maxPainStrike)}
                 </span>
               </Show>

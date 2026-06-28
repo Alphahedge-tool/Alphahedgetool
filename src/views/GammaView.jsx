@@ -4,7 +4,7 @@
 
 import { Show } from "solid-js";
 import * as KSelect from "@kobalte/core/select";
-import { number, formatPlain } from "../lib/format.js";
+import { number, formatPlain, fmtGEX } from "../lib/format.js";
 import { useApp } from "../state/AppContext.jsx";
 
 export function GammaView() {
@@ -14,7 +14,8 @@ export function GammaView() {
     gammaRange, chainDerivedStats, gammaDensity, chainSearchRows,
     setChainSearchOpen, setGammaRange, setScriptStatus,
     selectChainExpiry, loadChainSearchRows,
-    registerGammaIntradayHost, registerGammaExpiryHost,
+    registerGammaIntradayHost, registerGammaExpiryHost, registerGexTimeHost,
+    loadGexHistory, gexHistStatus, gexHistLoading, gexHistDate, setGexHistDate,
     run, loadOptionChain,
   } = useApp();
 
@@ -102,6 +103,24 @@ export function GammaView() {
         </div>
 
         <div class="gamma-metrics">
+          <div>
+            <span>Gamma</span>
+            <strong style={
+              gammaDensity().gexRegime === "long" ? "color:var(--bull)"
+              : gammaDensity().gexRegime === "short" ? "color:var(--bear)"
+              : ""
+            }>
+              {gammaDensity().gexRegime === "long" ? "LONG"
+                : gammaDensity().gexRegime === "short" ? "SHORT"
+                : gammaDensity().gexRegime === "neutral" ? "NEUTRAL"
+                : "--"}
+            </strong>
+            <span class="gamma-metric-sub">
+              {gammaDensity().gex == null ? "GEX --"
+                : `GEX ${gammaDensity().gex >= 0 ? "+" : ""}${fmtGEX(gammaDensity().gex)} Cr · ${gammaDensity().gexRegime === "short" ? "squeeze" : gammaDensity().gexRegime === "long" ? "pinning" : "—"}`}
+              {gammaDensity().lotSize ? ` · lot ${gammaDensity().lotSize}` : ""}
+            </span>
+          </div>
           <div><span>Spot</span><strong>{gammaDensity().spot == null ? "--" : number.format(gammaDensity().spot)}</strong></div>
           <div><span>ATM IV</span><strong class="iv">{gammaDensity().atmIv == null ? "--" : `${formatPlain(gammaDensity().atmIv, 2)}%`}</strong></div>
           <div>
@@ -114,6 +133,24 @@ export function GammaView() {
           <div><span>2σ Low</span><strong class="down">{gammaDensity().intradayBand ? number.format(gammaDensity().intradayBand.two_sigma_low) : "--"}</strong></div>
           <div><span>2σ High</span><strong class="up">{gammaDensity().intradayBand ? number.format(gammaDensity().intradayBand.two_sigma_high) : "--"}</strong></div>
           <div><span>Gamma Peak</span><strong>{gammaDensity().peakExpiryStrike == null ? "--" : number.format(gammaDensity().peakExpiryStrike)}</strong></div>
+          <div>
+            <span>Gamma Flip</span>
+            <strong style={
+              gammaDensity().flipRegime === "long" ? "color:var(--bull)"
+              : gammaDensity().flipRegime === "short" ? "color:var(--bear)"
+              : ""
+            }>
+              {gammaDensity().gammaFlip == null ? "--" : `~${number.format(Math.round(gammaDensity().gammaFlip))}`}
+            </strong>
+            <span class="gamma-metric-sub">
+              {gammaDensity().gammaFlipLow != null && gammaDensity().gammaFlipHigh != null
+                ? `zone ${number.format(gammaDensity().gammaFlipLow)}–${number.format(gammaDensity().gammaFlipHigh)}`
+                : "spot vs flip"}
+              {gammaDensity().flipRegime == null ? ""
+                : gammaDensity().flipRegime === "long" ? " · +γ pinning"
+                : " · −γ volatile"}
+            </span>
+          </div>
         </div>
 
         <div class="gamma-content">
@@ -145,6 +182,52 @@ export function GammaView() {
                 <div class="gamma-empty">Open an option chain with live Greeks to plot Γ×OI density.</div>
               </Show>
             </div>
+          </div>
+        </div>
+
+        {/* Total GEX over time — long↔short regime through the day */}
+        <div class="gamma-chart-card gamma-gex-time">
+          <div class="gamma-chart-head">
+            <div>
+              <strong>Total GEX over time</strong>
+              <span>Above zero = dealers long gamma (pinning) · below = short (squeeze)</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <Show when={gexHistStatus()}>
+                <span style="color:var(--tx-4);font-size:10px">{gexHistStatus()}</span>
+              </Show>
+              <input
+                type="date"
+                class="tb-field-input"
+                style="font-size:10px;padding:2px 6px"
+                value={gexHistDate()}
+                max={new Date().toISOString().slice(0, 10)}
+                onInput={(e) => setGexHistDate(e.currentTarget.value)}
+                aria-label="GEX history date"
+              />
+              <button data-ui="button" data-appearance="outline" style="font-size:10px"
+                disabled={gexHistLoading() || !gammaDensity().hasData}
+                onClick={() => loadGexHistory()}>
+                {gexHistLoading() ? "Loading…" : "Load history"}
+              </button>
+              <Show when={gammaDensity().gexRegime}>
+                <span class="gamma-peak-chip" style={
+                  gammaDensity().gexRegime === "long" ? "color:var(--bull)"
+                  : gammaDensity().gexRegime === "short" ? "color:var(--bear)"
+                  : ""
+                }>
+                  {gammaDensity().gexRegime === "long" ? "LONG"
+                    : gammaDensity().gexRegime === "short" ? "SHORT" : "NEUTRAL"}
+                  {gammaDensity().gex == null ? "" : ` ${gammaDensity().gex >= 0 ? "+" : ""}${fmtGEX(gammaDensity().gex)} Cr`}
+                </span>
+              </Show>
+            </div>
+          </div>
+          <div class="gamma-chart-shell">
+            <div class="gamma-chart" ref={(el) => registerGexTimeHost(el)} />
+            <Show when={!gammaDensity().hasData}>
+              <div class="gamma-empty">Open an option chain with live Greeks — GEX is recorded each tick.</div>
+            </Show>
           </div>
         </div>
       </div>

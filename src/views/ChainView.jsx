@@ -247,12 +247,12 @@ export function ChainView() {
               when={chainLive()}
               fallback={<button data-ui="button" data-appearance="outline" onClick={startChainLive} disabled={busy() || !authed()}>Live</button>}
             >
-              <button data-ui="button" data-appearance="outline" onClick={stopChainLive} style="border-color:rgba(240,79,79,0.4);color:var(--bear)">Stop</button>
+              <button data-ui="button" data-appearance="outline" onClick={stopChainLive} style="border-color:rgba(239,68,68,0.4);color:var(--bear)">Stop</button>
             </Show>
             <button
               data-ui="button"
               data-appearance="outline"
-              style={chainMonitor() ? "border-color:#22c55e;color:#22c55e;font-size:10px" : "font-size:10px"}
+              style={chainMonitor() ? "border-color:#10B981;color:#10B981;font-size:10px" : "font-size:10px"}
               onClick={() => {
                 setChainMonitor(!chainMonitor());
                 if (typeof Notification !== "undefined" && Notification.permission === "default") Notification.requestPermission();
@@ -328,8 +328,8 @@ export function ChainView() {
             <div style="display:flex;gap:6px;padding:4px 12px;overflow-x:auto;background:rgba(255,255,255,0.02);border-bottom:1px solid rgba(255,255,255,0.06);flex-shrink:0">
               <For each={chainAlerts().slice(0, 8)}>
                 {(a) => (
-                  <div style="flex-shrink:0;padding:4px 10px;border-radius:4px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);font-size:10px;white-space:nowrap">
-                    <span style="color:#f59e0b;font-weight:700">{a.title}</span>
+                  <div style="flex-shrink:0;padding:4px 10px;border-radius:4px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.2);font-size:10px;white-space:nowrap">
+                    <span style="color:#8B5CF6;font-weight:700">{a.title}</span>
                     <span style="color:var(--tx-3);margin-left:6px">{a.body}</span>
                   </div>
                 )}

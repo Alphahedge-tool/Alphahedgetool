@@ -59,8 +59,8 @@ export const ROLL_LIVE_THROTTLE_DEFAULT = 0;
 
 // OIE chart styling tokens (uPlot).
 export const OIE_AXIS_FONT = "11px Inter, system-ui, sans-serif";
-export const OIE_GRID     = "rgba(255,255,255,0.05)";
-export const OIE_TICK     = "rgba(255,255,255,0.12)";
-export const OIE_BORDER   = "rgba(255,255,255,0.08)";
+export const OIE_GRID     = "rgba(68,80,94,0.32)";
+export const OIE_TICK     = "rgba(68,80,94,0.50)";
+export const OIE_BORDER   = "rgba(68,80,94,0.45)";
 export const OIE_TEXT     = "rgba(160,180,200,0.85)";
-export const OIE_BG       = "#0c0f16";
+export const OIE_BG       = "#202A38";

@@ -11,11 +11,11 @@
 }
 .oie-nav-tab[aria-selected="true"],
 [data-ui="tabs"][data-activeid="gex"] > #gex {
-  background: linear-gradient(180deg, rgba(41,98,255,0.28), rgba(41,98,255,0.16)) !important;
-  border-color: rgba(41,98,255,0.35) !important;
+  background: linear-gradient(180deg, rgba(59,130,246,0.28), rgba(59,130,246,0.16)) !important;
+  border-color: rgba(59,130,246,0.35) !important;
   color: #fff !important;
   box-shadow:
-    0 2px 8px -2px rgba(41,98,255,0.5),
+    0 2px 8px -2px rgba(59,130,246,0.5),
     inset 0 1px 0 rgba(255,255,255,0.18) !important;
 }
 
@@ -33,14 +33,14 @@
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  box-shadow: 0 0 0 0 rgba(5,184,120,0.6);
+  box-shadow: 0 0 0 0 rgba(16,185,129,0.6);
   animation: oie-ping 2.2s ease-out infinite;
 }
 
 @keyframes oie-ping {
-  0%   { box-shadow: 0 0 0 0 rgba(5,184,120,0.55); }
-  70%  { box-shadow: 0 0 0 6px rgba(5,184,120,0); }
-  100% { box-shadow: 0 0 0 0 rgba(5,184,120,0); }
+  0%   { box-shadow: 0 0 0 0 rgba(16,185,129,0.55); }
+  70%  { box-shadow: 0 0 0 6px rgba(16,185,129,0); }
+  100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
 }
 
 /* ── workspace shell ── */
@@ -111,12 +111,12 @@
   white-space: nowrap;
 }
 .oie-sym-btn:hover {
-  border-color: rgba(41,98,255,0.4);
+  border-color: rgba(59,130,246,0.4);
   color: var(--tx-1);
   background: var(--bg-4);
 }
 .oie-sym-btn.active {
-  border-color: rgba(41,98,255,0.5);
+  border-color: rgba(59,130,246,0.5);
   background: var(--blue-dim);
   color: #fff;
 }
@@ -178,8 +178,8 @@
 }
 .oie-status-idle    { background: var(--bg-4); color: var(--tx-4); }
 .oie-status-loading { background: rgba(240,165,0,0.1); color: var(--warn); }
-.oie-status-live    { background: rgba(5,184,120,0.1); color: var(--bull); animation: oie-pulse 2s ease-in-out infinite; }
-.oie-status-error   { background: rgba(240,79,79,0.1); color: var(--bear); }
+.oie-status-live    { background: rgba(16,185,129,0.1); color: var(--bull); animation: oie-pulse 2s ease-in-out infinite; }
+.oie-status-error   { background: rgba(239,68,68,0.1); color: var(--bear); }
 
 .oie-chain-badge {
   font-size: 10px;
@@ -200,7 +200,7 @@
 .oie-refresh-btn {
   height: 28px;
   padding: 0 14px;
-  border: 1px solid rgba(41,98,255,0.35);
+  border: 1px solid rgba(59,130,246,0.35);
   border-radius: var(--r);
   background: var(--blue-dim);
   color: var(--blue-text);
@@ -210,8 +210,8 @@
   transition: background-color 120ms, border-color 120ms;
 }
 .oie-refresh-btn:hover:not(:disabled) {
-  background: rgba(41,98,255,0.2);
-  border-color: rgba(41,98,255,0.6);
+  background: rgba(59,130,246,0.2);
+  border-color: rgba(59,130,246,0.6);
   color: #fff;
 }
 .oie-refresh-btn:disabled { opacity: 0.35; cursor: not-allowed; }
@@ -520,7 +520,7 @@
 .oie-oi-up { color: var(--bull) !important; }
 .oie-oi-dn { color: var(--bear) !important; }
 
-.oie-atm-row td { background: rgba(41,98,255,0.05) !important; }
+.oie-atm-row td { background: rgba(59,130,246,0.05) !important; }
 .oie-atm-row .oie-strike-cell {
   background: var(--blue) !important;
   color: #fff !important;

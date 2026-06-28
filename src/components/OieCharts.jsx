@@ -164,7 +164,7 @@ export function OieOIBuildupChart({ strikes }) {
       ],
       series: [
         {},
-        { label: "ce oi", stroke: "#f87171", fill: "rgba(248,113,113,0.18)", points: { show: false }, paths: uPlot.paths.bars({ size: [0.35, 100], align: -1 }) },
+        { label: "ce oi", stroke: "#EF4444", fill: "rgba(248,113,113,0.18)", points: { show: false }, paths: uPlot.paths.bars({ size: [0.35, 100], align: -1 }) },
         { label: "pe oi", stroke: "#34d399", fill: "rgba(52,211,153,0.18)",  points: { show: false }, paths: uPlot.paths.bars({ size: [0.35, 100], align:  1 }) },
       ],
       hooks: {

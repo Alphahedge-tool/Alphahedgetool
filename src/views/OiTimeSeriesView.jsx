@@ -9,7 +9,7 @@ import { number, compactNumber } from "../lib/format.js";
 import { formatIstTime, dateKey } from "../lib/datetime.js";
 import { useApp } from "../state/AppContext.jsx";
 
-const OI_TS_COLORS = ["#22c55e", "#ef4444", "#3b82f6", "#f59e0b", "#a78bfa", "#06b6d4", "#f97316", "#ec4899", "#84cc16", "#14b8a6"];
+const OI_TS_COLORS = ["#10B981", "#EF4444", "#3B82F6", "#8B5CF6", "#8B5CF6", "#3B82F6", "#8B5CF6", "#8B5CF6", "#10B981", "#10B981"];
 const oiTsColor = (index, count) => count <= OI_TS_COLORS.length
   ? OI_TS_COLORS[index % OI_TS_COLORS.length]
   : `hsl(${Math.round((index * 360) / count)}, 72%, 58%)`;
@@ -178,7 +178,7 @@ export function OiTimeSeriesView() {
           }
 
           const strike = strikes[nearest.seriesIndex - 1];
-          const color = u.series[nearest.seriesIndex]?.stroke || "#8c8ca0";
+          const color = u.series[nearest.seriesIndex]?.stroke || "#9CA8B8";
           tooltip.style.setProperty("--oi-tip-color", color);
           tooltip.innerHTML = `
             <span class="oi-ts-tip-time">${formatIstTime(realTime)} IST</span>
@@ -276,17 +276,17 @@ export function OiTimeSeriesView() {
       scales: { x: { time: false }, y: { auto: true } },
       axes: [
         {
-          stroke: "#8c8ca0",
+          stroke: "#9CA8B8",
           ticks: { stroke: "rgba(255,255,255,0.1)", size: 4 },
-          grid: { stroke: "rgba(255,255,255,0.06)" },
+          grid: { stroke: "rgba(68,80,94,0.35)" },
           font: "10px system-ui",
           values: (_u, splits) => splits.map(idxToLabel),
           space: 60,
         },
         {
-          stroke: "#8c8ca0",
+          stroke: "#9CA8B8",
           ticks: { stroke: "rgba(255,255,255,0.1)", size: 4 },
-          grid: { stroke: "rgba(255,255,255,0.06)" },
+          grid: { stroke: "rgba(68,80,94,0.35)" },
           font: "10px system-ui",
           values: (u, vals) => vals.map((v) => compactNumber.format(v)),
           size: 52,
@@ -362,7 +362,7 @@ export function OiTimeSeriesView() {
             <div class="chain-toolbar-divider" />
             <button data-ui="button" data-appearance="accent" onClick={() => run(loadOiTsSeries)} disabled={busy()}>Load OI</button>
             <Show when={chainLive()} fallback={<button data-ui="button" data-appearance="outline" onClick={startChainLive} disabled={busy() || !authed()}>Live</button>}>
-              <button data-ui="button" data-appearance="outline" onClick={stopChainLive} style="border-color:rgba(240,79,79,0.4);color:var(--bear)">Stop</button>
+              <button data-ui="button" data-appearance="outline" onClick={stopChainLive} style="border-color:rgba(239,68,68,0.4);color:var(--bear)">Stop</button>
             </Show>
           </div>
           <div class="chain-toolbar-right">

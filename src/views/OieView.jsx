@@ -352,7 +352,7 @@ export function OieView() {
                   <span class="oie-chart-card-title">gex profile</span>
                   <span class="oie-chart-legend">
                     <span class="oie-legend-item"><span class="oie-legend-dot" style="background:#34d399" />long γ</span>
-                    <span class="oie-legend-item"><span class="oie-legend-dot" style="background:#f87171" />short γ</span>
+                    <span class="oie-legend-item"><span class="oie-legend-dot" style="background:#EF4444" />short γ</span>
                     <span class="oie-legend-item"><span class="oie-legend-dot" style="background:rgba(34,211,238,0.6);border-radius:2px" />atm</span>
                   </span>
                 </div>
@@ -370,7 +370,7 @@ export function OieView() {
                 <div class="oie-chart-header">
                   <span class="oie-chart-card-title">open interest buildup</span>
                   <span class="oie-chart-legend">
-                    <span class="oie-legend-item"><span class="oie-legend-dot" style="background:#f87171" />ce oi</span>
+                    <span class="oie-legend-item"><span class="oie-legend-dot" style="background:#EF4444" />ce oi</span>
                     <span class="oie-legend-item"><span class="oie-legend-dot" style="background:#34d399" />pe oi</span>
                   </span>
                 </div>

@@ -8,7 +8,7 @@
   min-height: 0;
   flex: 1 1 0;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
   background: var(--bg-0);
 }
 
@@ -62,7 +62,7 @@
 /* two side-by-side chart panels */
 .gamma-content {
   display: grid;
-  min-height: 0;
+  min-height: 360px;
   flex: 1 1 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: 1fr;
@@ -78,6 +78,12 @@
   border: 1px solid var(--bd-1);
   border-radius: var(--r-md);
   background: var(--bg-1);
+}
+/* Full-width total-GEX-over-time card below the two density panels */
+.gamma-gex-time {
+  margin: 0 12px 12px;
+  height: 420px;
+  flex: 0 0 auto;
 }
 .gamma-chart-head {
   display: flex;
@@ -114,8 +120,8 @@
   height: 20px;
   padding: 0 9px;
   border-radius: 999px;
-  background: rgba(245,158,11,0.12);
-  border: 1px solid rgba(245,158,11,0.3);
+  background: rgba(139,92,246,0.12);
+  border: 1px solid rgba(139,92,246,0.3);
   color: var(--warn);
   font-family: var(--mono);
   font-size: 10px;

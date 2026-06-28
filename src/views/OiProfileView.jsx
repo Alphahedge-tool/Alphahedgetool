@@ -28,19 +28,19 @@ export function OiProfileView() {
     const ceChgSeries = d.chain.map((r) => r.ceChg);
     const peChgSeries = d.chain.map((r) => -r.peChg);
     const atmIdx = d.atmStrike != null ? d.chain.findIndex((r) => r.strike === d.atmStrike) : -1;
-    const plotLines = atmIdx >= 0 ? [{ value: atmIdx, color: "rgba(255,255,255,0.35)", dashStyle: "ShortDash", width: 1, label: { text: "ATM", style: { color: "#b4b4c8", fontSize: "10px" } } }] : [];
+    const plotLines = atmIdx >= 0 ? [{ value: atmIdx, color: "rgba(68,80,94,0.75)", dashStyle: "ShortDash", width: 1, label: { text: "ATM", style: { color: "#D7DEE8", fontSize: "10px" } } }] : [];
     return Highcharts.chart(host, {
       chart: { type: "bar", backgroundColor: "transparent", animation: false, spacing: [8, 16, 8, 8] },
       title: { text: undefined }, credits: { enabled: false },
-      legend: { itemStyle: { color: "#b4b4c8", fontSize: "10px" }, itemHoverStyle: { color: "#f0f0f4" } },
+      legend: { itemStyle: { color: "#D7DEE8", fontSize: "10px" }, itemHoverStyle: { color: "#D7DEE8" } },
       xAxis: [
-        { categories, reversed: false, plotLines, labels: { style: { color: "#8c8ca0", fontSize: "10px" }, formatter: function () { return this.value; } } },
-        { categories, reversed: false, linkedTo: 0, opposite: true, labels: { style: { color: "#8c8ca0", fontSize: "10px" } } }
+        { categories, reversed: false, plotLines, labels: { style: { color: "#9CA8B8", fontSize: "10px" }, formatter: function () { return this.value; } } },
+        { categories, reversed: false, linkedTo: 0, opposite: true, labels: { style: { color: "#9CA8B8", fontSize: "10px" } } }
       ],
       yAxis: {
         title: { text: undefined },
-        labels: { style: { color: "#8c8ca0", fontSize: "10px" }, formatter: function () { return compactNumber.format(Math.abs(this.value)); } },
-        gridLineColor: "rgba(255,255,255,0.06)"
+        labels: { style: { color: "#9CA8B8", fontSize: "10px" }, formatter: function () { return compactNumber.format(Math.abs(this.value)); } },
+        gridLineColor: "rgba(68,80,94,0.35)"
       },
       tooltip: {
         shared: true, useHTML: true,
@@ -51,9 +51,9 @@ export function OiProfileView() {
       },
       plotOptions: { series: { animation: false, grouping: false, borderWidth: 0 }, bar: { groupPadding: 0.05, pointPadding: 0.05 } },
       series: [
-        { name: "CE OI", data: ceSeries, color: "rgba(34,197,94,0.7)", zIndex: 2 },
+        { name: "CE OI", data: ceSeries, color: "rgba(16,185,129,0.7)", zIndex: 2 },
         { name: "PE OI", data: peSeries, color: "rgba(239,68,68,0.7)", zIndex: 2 },
-        { name: "CE ΔOI", data: ceChgSeries, color: "rgba(34,197,94,0.35)", zIndex: 1 },
+        { name: "CE ΔOI", data: ceChgSeries, color: "rgba(16,185,129,0.35)", zIndex: 1 },
         { name: "PE ΔOI", data: peChgSeries, color: "rgba(239,68,68,0.35)", zIndex: 1 },
       ]
     });
@@ -90,7 +90,7 @@ export function OiProfileView() {
             <div class="chain-toolbar-divider" />
             <button data-ui="button" data-appearance="accent" onClick={() => run(loadOptionChain)} disabled={busy()}>Load</button>
             <Show when={chainLive()} fallback={<button data-ui="button" data-appearance="outline" onClick={startChainLive} disabled={busy() || !authed()}>Live</button>}>
-              <button data-ui="button" data-appearance="outline" onClick={stopChainLive} style="border-color:rgba(240,79,79,0.4);color:var(--bear)">Stop</button>
+              <button data-ui="button" data-appearance="outline" onClick={stopChainLive} style="border-color:rgba(239,68,68,0.4);color:var(--bear)">Stop</button>
             </Show>
           </div>
           <div class="chain-toolbar-right">
